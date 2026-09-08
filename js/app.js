@@ -291,6 +291,7 @@ function fillSettings() {
   $('#set-pat').value = s.pat;
   $('#set-repo').value = s.repo;
   $('#set-glm').value = s.glmKey;
+  $('#set-glmbase').value = s.glmBase;
   $('#set-budget').value = s.chatBudgetUsd;
   $('#set-pricein').value = s.priceInPerM;
   $('#set-priceout').value = s.priceOutPerM;
@@ -302,12 +303,15 @@ function bindSettings() {
       pat: $('#set-pat').value.trim(),
       repo: $('#set-repo').value.trim(),
       glmKey: $('#set-glm').value.trim(),
+      glmBase: $('#set-glmbase').value.trim(),
       chatBudgetUsd: parseFloat($('#set-budget').value) || 3,
       priceInPerM: parseFloat($('#set-pricein').value) || 0,
       priceOutPerM: parseFloat($('#set-priceout').value) || 0,
     });
     try {
       await busy(testConnection());
+      $('#conn').textContent = settings.load().repo;
+      $('#conn').classList.add('on');
       toast('✓ 连接成功');
       await loadTree();
       await renderAll();
@@ -346,6 +350,8 @@ async function boot() {
   if (!s.pat) { show('settings'); fillSettings(); toast('先在设置里粘贴 GitHub PAT', true); return; }
   try {
     await testConnection();
+    $('#conn').textContent = s.repo;
+    $('#conn').classList.add('on');
     await loadTree();
     await renderAll();
     show('dashboard');

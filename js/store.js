@@ -8,6 +8,7 @@ export const settings = {
       pat: g('pat', ''),
       repo: g('repo', 'JoesonZX/planning-data'),
       glmKey: g('glmKey', ''),
+      glmBase: g('glmBase', 'https://open.bigmodel.cn/api/coding/paas/v4'),
       model: g('model', 'glm-5.3'),
       thinking: g('thinking', 'enabled'),          // enabled | disabled
       chatBudgetUsd: parseFloat(g('chatBudgetUsd', '3')),

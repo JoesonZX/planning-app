@@ -3,9 +3,9 @@
 import { settings, addUsage, usage, estCost } from './store.js';
 import { render as mdRender } from './md.js';
 
-const GLM_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 const CONTEXT_FILE_CAP = 6000;   // 每文件字符上限
 const CONTEXT_TOTAL_CAP = 120000;
+// coding plan key 走 /api/coding/paas/v4；标准平台 key 走 /api/paas/v4（设置里可改）
 
 const SYSTEM_PROMPT = [
   '你是用户的个人规划助手。用户会给你他的整个规划 vault（markdown）。',
@@ -56,7 +56,9 @@ export async function sendChat(userText, context, history) {
     body.thinking = { type: 'enabled' };
   }
 
-  const res = await fetch(GLM_URL, {
+  const url = (s.glmBase || 'https://open.bigmodel.cn/api/coding/paas/v4')
+    .replace(/\/+$/, '') + '/chat/completions';
+  const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${s.glmKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
