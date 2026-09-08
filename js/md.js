@@ -9,6 +9,7 @@ export function escapeHtml(s) {
 function inline(text) {
   let t = escapeHtml(text);
   t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
   t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,

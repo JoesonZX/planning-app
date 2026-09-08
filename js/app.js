@@ -80,7 +80,13 @@ async function renderDashboard() {
 // ---------- 报告 ----------
 async function renderReports(selected) {
   const reports = state.tree.filter(t => /^reports\/(tomorrow|week-.*|triage.*)/.test(t.path))
-                            .map(t => t.path).sort().reverse();
+                            .map(t => t.path);
+  // tomorrow 永远排第一，其余按名倒序（新周报在前）
+  reports.sort((a, b) => {
+    if (a.includes('tomorrow')) return -1;
+    if (b.includes('tomorrow')) return 1;
+    return b.localeCompare(a);
+  });
   const chips = $('#report-chips');
   chips.innerHTML = reports.map(p =>
     `<button class="chip" data-p="${p}">${p.replace('reports/', '')}</button>`).join('')
