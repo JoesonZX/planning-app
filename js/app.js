@@ -79,8 +79,9 @@ async function renderDashboard() {
 
 // ---------- 报告 ----------
 async function renderReports(selected) {
-  const reports = state.tree.filter(t => /^reports\/(tomorrow|week-.*|triage.*)/.test(t.path))
-                            .map(t => t.path);
+  const reports = state.tree.filter(t =>
+    /^reports\/(tomorrow|week-.*|triage.*)/.test(t.path) && t.path.endsWith('.md'))
+    .map(t => t.path)
   // tomorrow 永远排第一，其余按名倒序（新周报在前）
   reports.sort((a, b) => {
     if (a.includes('tomorrow')) return -1;
@@ -171,7 +172,11 @@ async function openFile(path) {
   $('#file-title').textContent = path;
   renderInto($('#file-body'), f.text, path);
   $('#file-editor').value = f.text;
+  // 重置编辑器状态（上次可能处于编辑中）
   $('#file-editor').classList.remove('on');
+  $('#file-editor').classList.add('hidden');
+  $('#btn-save').classList.add('hidden');
+  $('#file-body').classList.remove('hidden');
   $('#btn-edit').textContent = '编辑';
   history.replaceState(null, '', '#file=' + encodeURIComponent(path));
 }
