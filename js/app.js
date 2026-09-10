@@ -1,18 +1,25 @@
-// app.js — 视图、路由、写回交互（移动优先）
+// app.js — v3：任务中心视图（今天/计划/收件箱/文档/聊天/设置）
+// 数据流：GitHub( md + state.json + stats.json ) → state → render；写回 = 行级翻转/追加/整文件
 import { settings } from './store.js';
 import { testConnection, getTree, getContent, putContent } from './api.js';
 import { render as mdRender, flipCheckbox, escapeHtml } from './md.js';
 import { buildContext, sendChat, renderMessage, usageSummary } from './chat.js';
 
-const state = { tree: [], fileCache: {}, currentFile: null, chatContext: null };
-const $ = sel => document.querySelector(sel);
-const $$ = sel => [...document.querySelectorAll(sel)];
+const VAPID_PUBLIC = 'BPkee1I-7uyoJVE6Df3nIa9UqHT3vGKBnofIn7VwAWq9uuVbrHqLbaEOvDoiPCXVT7UdrSPtQBgl_Se44wCr-pE';
+const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六'];
+
+const state = { tree: [], fileCache: {}, currentFile: null, stateData: null, statsData: null, chatContext: null };
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
 
 // ---------- 基础 UI ----------
 function show(tab) {
   $$('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + tab));
   if (tab === 'chat') ensureChatContext();
+  if (tab === 'today' && !$('#today-body').dataset.loaded) renderToday();
+  if (tab === 'plan' && !$('#plan-body').dataset.loaded) renderPlan();
+  if (tab === 'inbox' && !$('#inbox-body').dataset.loaded) renderInboxView();
 }
 function toast(msg, err = false) {
   const t = $('#toast');
@@ -20,15 +27,17 @@ function toast(msg, err = false) {
   t.className = 'show' + (err ? ' err' : '');
   setTimeout(() => { t.className = ''; }, 3200);
 }
-async function busy(promise) {
+async function busy(p) {
   $('#loading').classList.add('on');
-  try { return await promise; }
-  finally { $('#loading').classList.remove('on'); }
+  try { return await p; } finally { $('#loading').classList.remove('on'); }
 }
+const skeleton = () => '<div class="skel"></div><div class="skel w70"></div><div class="skel w85"></div><div class="skel w60"></div>';
+const emptyState = (icon, text, action = '') =>
+  `<div class="empty">${icon}<p>${text}</p>${action}</div>`;
+function vibrate(ms = 12) { if (navigator.vibrate) navigator.vibrate(ms); }
 
 // ---------- GitHub 数据 ----------
 async function loadTree() { state.tree = await busy(getTree()); }
-const cacheGet = (path) => state.fileCache[path];
 async function fetchFile(path) {
   if (state.fileCache[path]) return state.fileCache[path];
   const { text, sha } = await getContent(path);
@@ -41,129 +50,206 @@ async function writeFile(path, text, message) {
   const newSha = await putContent(path, text, sha, message);
   state.fileCache[path] = { text, sha: newSha, lines: text.split('\n') };
 }
-
-function bindCheckboxes(container, path) {
-  container.querySelectorAll('.cb input').forEach(input => {
-    input.addEventListener('change', async () => {
-      const lineNo = +input.closest('.cb').dataset.line;
-      const cached = await fetchFile(path);
-      const newText = flipCheckbox(cached.lines, lineNo);
-      if (newText === null) return;
-      try {
-        await writeFile(path, newText, `app: ${path} 行 ${lineNo + 1} 勾选`);
-        cached.lines = newText.split('\n');
-        input.closest('.cb').querySelector('span').classList.toggle('done', input.checked);
-        toast('✓ 已同步到 GitHub');
-      } catch (e) {
-        input.checked = !input.checked;
-        delete state.fileCache[path];
-        toast('同步失败（已重拉最新），' + e.message, true);
-      }
-    });
-  });
-}
-function renderInto(container, text, path) {
-  const r = mdRender(text);
-  container.innerHTML = r.html;
-  if (path) bindCheckboxes(container, path);
+async function fetchJSON(path) {
+  const f = await fetchFile(path);
+  return JSON.parse(f.text);
 }
 
-// ---------- 仪表盘 ----------
-async function renderDashboard() {
-  const el = $('#dash-body');
+// 状态条目勾选 → 翻转源文件对应行
+async function toggleStateItem(file, lineNo, inputEl) {
+  vibrate();
   try {
-    const f = await fetchFile('仪表盘.md');
-    renderInto(el, f.text, '仪表盘.md');
-  } catch (e) { el.innerHTML = `<p class="dim">仪表盘还没生成——今晚 21:00 后第一次晚间报告会创建它。${e.message}</p>`; }
+    const cached = await fetchFile(file);
+    const newText = flipCheckbox(cached.lines, lineNo - 1); // parser 行号 1-based
+    if (newText === null) { inputEl.checked = !inputEl.checked; return; }
+    await writeFile(file, newText, `app: ${file} 行 ${lineNo} 勾选`);
+    inputEl.closest('.cb')?.querySelector('span')?.classList.toggle('done', inputEl.checked);
+    toast('✓ 已同步');
+  } catch (e) {
+    inputEl.checked = !inputEl.checked;
+    delete state.fileCache[file];
+    toast('同步失败，' + e.message, true);
+  }
+}
+function bindCb(container) {
+  container.querySelectorAll('.cb[data-file]').forEach(input => {
+    input.addEventListener('change', () =>
+      toggleStateItem(input.dataset.file, +input.dataset.line, input));
+  });
+}
+const itemCard = it => {
+  const inner = `<span class="${it.d ? 'done' : ''}">${escapeHtml((it.s ? '⭐ ' : '') + it.t)}</span>`
+    + `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}）</em>`;
+  if (typeof it.d === 'boolean')
+    return `<label class="cb" data-file="${it.f}" data-line="${it.l}">` +
+      `<input type="checkbox" ${it.d ? 'checked' : ''}>${inner}</label>`;
+  return `<div class="cb static">${inner}</div>`;
+};
+
+// ---------- 今天 ----------
+function fmtDay(iso, withWeek = true) {
+  const d = new Date(iso + 'T12:00:00');
+  const s = `${+iso.slice(5, 7)}/${+iso.slice(8, 10)}`;
+  return withWeek ? `${s} 周${WEEKDAY_CN[d.getDay()]}` : s;
+}
+function renderHeatmap(stats) {
+  const days = stats.days;
+  const dates = Object.keys(days).sort();
+  if (!dates.length) return '';
+  // 12 周 × 7 行，末列为当前周
+  const cells = [];
+  const total = 12 * 7;
+  const padded = Array(total - dates.length).fill(null).concat(dates.map(d => ({ d, ...days[d] })));
+  const now = new Date();
+  let html = '<div class="heatmap" id="heatmap">';
+  padded.forEach(cell => {
+    if (!cell) { html += '<i class="hcell off"></i>'; return; }
+    const level = cell.x + cell.c === 0 ? 0 : cell.x + cell.c <= 1 ? 1 : cell.x + cell.c <= 3 ? 2 : 3;
+    const dt2 = new Date(cell.d + 'T12:00:00');
+    const isFuture = dt2 > now;
+    html += `<i class="hcell l${level}${isFuture ? ' future' : ''}" title="${cell.d}：${cell.c} 提交 / ${cell.x} 勾选"></i>`;
+  });
+  html += '</div>';
+  return `<h2 class="sec">🔥 坚持</h2><p class="dim small">近 12 周 · 越亮越活跃（仅你的提交计入）</p>${html}`;
+}
+async function renderToday() {
+  const el = $('#today-body');
+  const s = settings.load();
+  if (!s.pat) { $('#onboarding').classList.remove('hidden'); el.innerHTML = ''; return; }
+  $('#onboarding').classList.add('hidden');
+  el.innerHTML = skeleton();
+  el.dataset.loaded = '1';
+  try {
+    const sd = state.stateData || (state.stateData = await fetchJSON('reports/state.json'));
+    const today = sd.today;
+    let html = `<h2 class="sec">☀️ 今天 · ${fmtDay(today)}</h2>`;
+    // 时间线
+    if (sd.timeline?.length) {
+      html += '<div class="timeline">';
+      for (const [time, label] of sd.timeline)
+        html += `<div class="trow"><b>${time}</b><span>${label}</span></div>`;
+      html += '</div>';
+    }
+    html += sd.today_items.length
+      ? `<div class="cards">${sd.today_items.map(itemCard).join('')}</div>`
+      : emptyState('🌤️', '今天没有标注事项——把明天要做的提前想好');
+    if (sd.stale.length)
+      html += `<h2 class="sec">🐌 滑落（拖了很久）</h2><div class="cards">${sd.stale.map(itemCard).join('')}</div>`;
+    if (state.statsData) html += renderHeatmap(state.statsData);
+    el.innerHTML = html;
+    bindCb(el);
+  } catch (e) {
+    el.innerHTML = emptyState('🌙', 'state.json 还没生成——今晚 21:00 的晚间报告会带上它',
+      e.message.includes('404') ? '' : `<p class="dim small">${e.message}</p>`);
+  }
 }
 
-// ---------- 报告 ----------
-async function renderReports(selected) {
+// ---------- 计划 ----------
+async function renderPlan() {
+  const el = $('#plan-body');
+  el.innerHTML = skeleton();
+  el.dataset.loaded = '1';
+  try {
+    const sd = state.stateData || (state.stateData = await fetchJSON('reports/state.json'));
+    const today = sd.today;
+    if (!sd.week.length) { el.innerHTML = emptyState('📅', '未来 7 天没有安排'); return; }
+    el.innerHTML = sd.week.map(g => {
+      const d = new Date(g.date + 'T12:00:00');
+      const rel = g.date === today ? '明天→' : '';
+      return `<h3 class="dayhead">${rel}${fmtDay(g.date)}</h3>
+        <div class="cards">${g.items.map(itemCard).join('')}</div>`;
+    }).join('');
+    bindCb(el);
+  } catch (e) {
+    el.innerHTML = emptyState('🌙', '计划数据来自每晚的 state.json（今晚起生成）', e.message);
+  }
+}
+
+// ---------- 收件箱 ----------
+async function renderInboxView() {
+  const el = $('#inbox-body');
+  try {
+    const f = await fetchFile('inbox.md');
+    const lines = f.text.split('\n').map(x => x.trim())
+      .filter(x => x && !x.startsWith('#'));
+    el.innerHTML = lines.length
+      ? `<div class="cards">${lines.map(l => {
+          const m = l.match(/^([-*])\s+\[([ xX])\]\s*(.*)$/) || l.match(/^⏳\s*待人工[：:]\s*(.*)$/);
+          const held = l.startsWith('⏳');
+          const body = held ? m ? m[1] : l.slice(6)
+            : m ? m[3] : l;
+          return `<div class="card ${held ? 'warn' : ''}">${held ? '⏳ ' : ''}${escapeHtml(body)}<em>（${held ? '待人工处理' : 'inbox'}）</em></div>`;
+        }).join('')}</div>
+        <p class="dim small">每周日 20:00 自动分拣进对应文件；⏳ 项需要你亲手处理。</p>`
+      : emptyState('📥', '收件箱是空的——上面的框随手记');
+    el.dataset.loaded = '1';
+  } catch (e) { el.innerHTML = emptyState('📥', 'inbox.md 读取失败：' + e.message); }
+}
+function enqueueOffline(line) {
+  const q = JSON.parse(localStorage.getItem('pp_outbox') || '[]');
+  q.push(line);
+  localStorage.setItem('pp_outbox', JSON.stringify(q));
+  toast('📴 当前离线，已存本地，联网后自动同步');
+}
+async function flushOutbox() {
+  const q = JSON.parse(localStorage.getItem('pp_outbox') || '[]');
+  if (!q.length || !settings.load().pat) return;
+  try {
+    const inbox = await fetchFile('inbox.md');
+    await writeFile('inbox.md', inbox.text.replace(/\s*$/, '') + '\n' + q.join('\n') + '\n', 'app: 离线补记');
+    localStorage.removeItem('pp_outbox');
+    toast(`✓ 已补记 ${q.length} 条离线内容`);
+  } catch { /* 下次再试 */ }
+}
+async function inboxSubmit() {
+  const input = $('#inbox-input');
+  const text = input.value.trim();
+  if (!text) return;
+  const line = $('#inbox-task').checked ? `- [ ] ${text}` : text;
+  try {
+    const inbox = await fetchFile('inbox.md');
+    await writeFile('inbox.md', inbox.text.replace(/\s*$/, '') + '\n' + line + '\n', 'app: 随手记');
+    input.value = '';
+    vibrate();
+    toast('✓ 已记入（周日自动分拣）');
+    if ($('#view-inbox').classList.contains('active')) renderInboxView();
+  } catch (e) {
+    if (navigator.onLine === false || /Failed to fetch|NetworkError/i.test(e.message)) enqueueOffline(line);
+    else toast('写入失败：' + e.message, true);
+  }
+}
+
+// ---------- 文档（报告 + 文件） ----------
+async function renderDocs() {
   const reports = state.tree.filter(t =>
-    /^reports\/(tomorrow|week-.*|triage.*)/.test(t.path) && t.path.endsWith('.md'))
-    .map(t => t.path)
-  // tomorrow 永远排第一，其余按名倒序（新周报在前）
-  reports.sort((a, b) => {
-    if (a.includes('tomorrow')) return -1;
-    if (b.includes('tomorrow')) return 1;
-    return b.localeCompare(a);
-  });
+    /^reports\/(tomorrow|week-.*|triage.*)\.md$/.test(t.path)).map(t => t.path);
+  reports.sort((a, b) => a.includes('tomorrow') ? -1 : b.includes('tomorrow') ? 1 : b.localeCompare(a));
   const chips = $('#report-chips');
   chips.innerHTML = reports.map(p =>
     `<button class="chip" data-p="${p}">${p.replace('reports/', '')}</button>`).join('')
     || '<span class="dim">还没有报告</span>';
   chips.querySelectorAll('.chip').forEach(b =>
     b.addEventListener('click', () => loadReport(b.dataset.p)));
-  if (selected) loadReport(selected);
-  else if (reports.includes('reports/tomorrow.md')) loadReport('reports/tomorrow.md');
-  else if (reports.length) loadReport(reports[0]);
-}
-async function loadReport(path) {
-  $$('#report-chips .chip').forEach(b => b.classList.toggle('active', b.dataset.p === path));
-  const f = await busy(fetchFile(path));
-  renderInto($('#report-body'), f.text, path);
-}
+  if (reports.length) loadReport(reports[0]);
 
-// ---------- 日历（ICS） ----------
-function parseIcs(text) {
-  // 折行还原（续行以空格开头）
-  const unfolded = text.replace(/\r\n[ \t]/g, '').split(/\r?\n/);
-  const events = [];
-  let cur = null;
-  for (const line of unfolded) {
-    if (line === 'BEGIN:VEVENT') cur = {};
-    else if (line === 'END:VEVENT') { if (cur) events.push(cur); cur = null; }
-    else if (cur) {
-      const m = line.match(/^([^:]+):(.*)$/);
-      if (!m) continue;
-      const key = m[1].split(';')[0];
-      if (key === 'DTSTART' || key === 'SUMMARY') cur[key] = m[2];
-    }
-  }
-  return events
-    .filter(e => e.DTSTART && e.SUMMARY)
-    .map(e => ({ date: e.DTSTART, text: e.SUMMARY.replace(/\\,/g, ',').replace(/\\;/g, ';') }))
-    .sort((a, b) => a.date.localeCompare(b.date));
-}
-function relLabel(ymd) {
-  const d = new Date(ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8));
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const diff = Math.round((d - today) / 86400000);
-  if (diff === 0) return '今天';
-  if (diff === 1) return '明天';
-  if (diff === 2) return '后天';
-  if (diff < 0) return `${-diff} 天前`;
-  return `${diff} 天后`;
-}
-async function renderCalendar() {
-  const el = $('#cal-body');
-  try {
-    const f = await fetchFile('reports/deadlines.ics');
-    const events = parseIcs(f.text);
-    if (!events.length) { el.innerHTML = '<p class="dim">日历为空</p>'; return; }
-    el.innerHTML = events.map(e => {
-      const past = relLabel(e.date).endsWith('前');
-      const ymd = `${e.date.slice(0, 4)}/${e.date.slice(4, 6)}/${e.date.slice(6, 8)}`;
-      return `<div class="cal-row ${past ? 'past' : ''}">
-        <span class="rel">${relLabel(e.date)}</span>
-        <span class="cal-text">${e.text}</span>
-        <span class="dim">${ymd}</span></div>`;
-    }).join('');
-  } catch (e) { el.innerHTML = `<p class="dim">deadlines.ics 尚未生成（今晚晚间报告后出现）。</p>`; }
-}
-
-// ---------- 文件 ----------
-async function renderFileList() {
   const groups = { '': '根目录', '规划/': '规划', 'reports/': '报告' };
   const el = $('#file-list');
   el.innerHTML = Object.entries(groups).map(([prefix, label]) => {
-    const files = state.tree.filter(t => t.path.startsWith(prefix) && t.path.endsWith('.md') && t.path.split('/').length <= (prefix ? 2 : 1));
+    const files = state.tree.filter(t => t.path.startsWith(prefix) && t.path.endsWith('.md')
+      && t.path.split('/').length <= (prefix ? 2 : 1) && !/^reports\/(tomorrow|week)/.test(t.path));
     return `<h3>${label}</h3>` + (files.length
       ? files.map(f => `<button class="file-link" data-p="${f.path}">${f.path.replace(prefix, '')}</button>`).join('')
       : '<p class="dim">（无）</p>');
   }).join('');
   el.querySelectorAll('.file-link').forEach(b =>
     b.addEventListener('click', () => openFile(b.dataset.p)));
+}
+async function loadReport(path) {
+  $$('#report-chips .chip').forEach(b => b.classList.toggle('active', b.dataset.p === path));
+  const f = await busy(fetchFile(path));
+  const r = mdRender(f.text);
+  $('#report-body').innerHTML = r.html;
+  // 报告内的 checkbox 指向源文件？报告是生成物——只读展示，不绑定写回
 }
 async function openFile(path) {
   state.currentFile = path;
@@ -172,26 +258,17 @@ async function openFile(path) {
   $('#file-title').textContent = path;
   renderInto($('#file-body'), f.text, path);
   $('#file-editor').value = f.text;
-  // 重置编辑器状态（上次可能处于编辑中）
-  $('#file-editor').classList.remove('on');
-  $('#file-editor').classList.add('hidden');
-  $('#btn-save').classList.add('hidden');
-  $('#file-body').classList.remove('hidden');
-  $('#btn-edit').textContent = '编辑';
+  setFileMode('preview');
   history.replaceState(null, '', '#file=' + encodeURIComponent(path));
 }
-async function toggleEditor() {
-  const ed = $('#file-editor');
-  const opening = !ed.classList.contains('on');
-  ed.classList.toggle('on', opening);
-  ed.classList.toggle('hidden', !opening);
-  $('#btn-save').classList.toggle('hidden', !opening);
-  $('#file-body').classList.toggle('hidden', opening);
-  $('#btn-edit').textContent = opening ? '取消' : '编辑';
-  if (opening && state.currentFile) {
-    const f = state.fileCache[state.currentFile];
-    if (f) ed.value = f.text;
-  } else if (state.currentFile) {
+function setFileMode(mode) {
+  const editing = mode === 'edit';
+  $('#file-editor').classList.toggle('hidden', !editing);
+  $('#btn-save').classList.toggle('hidden', !editing);
+  $('#file-body').classList.toggle('hidden', editing);
+  $('#btn-edit').classList.toggle('active', editing);
+  $('#btn-preview').classList.toggle('active', !editing);
+  if (!editing && state.currentFile) {
     const f = state.fileCache[state.currentFile];
     if (f) renderInto($('#file-body'), f.text, state.currentFile);
   }
@@ -201,28 +278,31 @@ async function saveFile() {
   try {
     await writeFile(path, $('#file-editor').value, `app: 编辑 ${path}`);
     toast('✓ 已保存并提交');
-    toggleEditor();
-    renderInto($('#file-body'), state.fileCache[path].text, path);
+    setFileMode('preview');
   } catch (e) { toast('保存失败：' + e.message, true); }
 }
-
-// ---------- 随手记（inbox 快速捕获） ----------
-async function captureSubmit() {
-  const text = $('#capture-input').value.trim();
-  if (!text) return;
-  const asTask = $('#capture-task').checked;
-  const line = asTask ? `- [ ] ${text}` : text;
-  try {
-    const inbox = await fetchFile('inbox.md');
-    const next = inbox.text.replace(/\s*$/, '') + '\n' + line + '\n';
-    await writeFile('inbox.md', next, `app: 随手记`);
-    $('#capture-input').value = '';
-    closeCapture();
-    toast('✓ 已记入 inbox（周日自动分拣）');
-  } catch (e) { toast('写入失败：' + e.message, true); }
+function renderInto(container, text, path) {
+  const r = mdRender(text);
+  container.innerHTML = r.html;
+  container.querySelectorAll('.cb input').forEach(input => {
+    input.addEventListener('change', async () => {
+      const lineNo = +input.closest('.cb').dataset.line;
+      const cached = await fetchFile(path);
+      const newText = flipCheckbox(cached.lines, lineNo);
+      if (newText === null) return;
+      try {
+        vibrate();
+        await writeFile(path, newText, `app: ${path} 行 ${lineNo + 1} 勾选`);
+        input.closest('.cb').querySelector('span')?.classList.toggle('done', input.checked);
+        toast('✓ 已同步到 GitHub');
+      } catch (e) {
+        input.checked = !input.checked;
+        delete state.fileCache[path];
+        toast('同步失败（已重拉最新），' + e.message, true);
+      }
+    });
+  });
 }
-function openCapture() { $('#capture-sheet').classList.add('on'); $('#capture-input').focus(); }
-function closeCapture() { $('#capture-sheet').classList.remove('on'); }
 
 // ---------- 聊天 ----------
 async function ensureChatContext() {
@@ -230,14 +310,17 @@ async function ensureChatContext() {
   $('#chat-model').value = s.model;
   $('#chat-thinking').checked = s.thinking === 'enabled';
   $('#chat-usage').textContent = usageSummary();
+  drawChat();
   if (state.chatContext || !s.pat) return;
-  $('#chat-status').textContent = '正在加载 vault 上下文…';
+  $('#chat-status').textContent = '正在并行加载 vault 上下文…';
   try {
+    const t0 = Date.now();
     state.chatContext = await buildContext({
-      tree: getTree,
+      paths: () => state.tree.length ? state.tree : getTree(),
       raw: async p => (await fetchFile(p)).text,
     });
-    $('#chat-status').textContent = `上下文就绪（${(state.chatContext.length / 1000).toFixed(0)}k 字符）`;
+    $('#chat-status').textContent =
+      `上下文就绪（${(state.chatContext.length / 1000).toFixed(0)}k 字符 / ${((Date.now() - t0) / 1000).toFixed(1)}s）`;
   } catch (e) { $('#chat-status').textContent = '上下文加载失败：' + e.message; }
 }
 function pushMessage(role, content, reasoning) {
@@ -253,20 +336,14 @@ function drawChat() {
     if (m.role === 'assistant') {
       let main = m.content
         ? renderMessage(m.content)
-        : '<span class="dim">（正文为空——思考未完成即截断，可重试；思考过程见下方）</span>';
-      if (m.reasoning) {
+        : '<span class="dim">（正文为空——思考未完成即截断，可重试）</span>';
+      if (m.reasoning)
         main += `<details class="reason"><summary>💭 思考过程</summary>` +
           `<div class="reason-body">${escapeHtml(m.reasoning)}</div></details>`;
-      }
       body = main;
-    } else {
-      body = m.content.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    }
-    return `
-    <div class="msg ${m.role}">
-      <div class="bubble">${body}</div>
-      ${m.role === 'assistant' && m.content ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : ''}
-    </div>`;
+    } else body = escapeHtml(m.content);
+    return `<div class="msg ${m.role}"><div class="bubble">${body}</div>` +
+      (m.role === 'assistant' && m.content ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : '') + `</div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
   el.querySelectorAll('.to-inbox').forEach(b => b.addEventListener('click', async () => {
@@ -278,9 +355,9 @@ function drawChat() {
     } catch (e) { toast('写入失败：' + e.message, true); }
   }));
 }
-async function chatSend() {
+async function chatSend(preset) {
   const input = $('#chat-input');
-  const text = input.value.trim();
+  const text = (preset || input.value).trim();
   if (!text) return;
   input.value = '';
   pushMessage('user', text); drawChat();
@@ -294,21 +371,79 @@ async function chatSend() {
     drawChat();
     $('#chat-usage').textContent = usageSummary();
     errEl.textContent = '';
-  } catch (e) {
-    errEl.textContent = e.message;
-  }
+  } catch (e) { errEl.textContent = e.message; }
 }
 function bindChat() {
-  $('#chat-send').addEventListener('click', chatSend);
+  $('#chat-send').addEventListener('click', () => chatSend());
   $('#chat-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); }
   });
   $('#chat-model').addEventListener('change', e => settings.save({ model: e.target.value }));
   $('#chat-thinking').addEventListener('change', e => settings.save({ thinking: e.target.checked ? 'enabled' : 'disabled' }));
-  $('#chat-clear').addEventListener('click', () => {
-    localStorage.removeItem('pp_chat'); drawChat(); toast('聊天记录已清空');
-  });
+  $('#chat-clear').addEventListener('click', () => { localStorage.removeItem('pp_chat'); drawChat(); toast('聊天记录已清空'); });
+  const presets = [
+    ['📊 周日复盘', '请带我做完本周复盘：1) 从 vault 列出本周完成与滑落；2) 一次一个地问我三个关于下周的问题，等我回答；3) 最后汇总「下周三件事」，每件带何时/何地。'],
+    ['☀️ 今天做什么', '基于今天的日期和 vault，告诉我今天最该做的三件事和顺序，一句话理由。'],
+    ['🗺️ 怎么用这个系统', '用 5 句话向新用户解释这个 app 各 tab 的用途和自动化流程。'],
+  ];
+  $('#chat-presets').innerHTML = presets.map((p, i) =>
+    `<button class="mini preset" data-i="${i}">${p[0]}</button>`).join('');
+  $$('#chat-presets .preset').forEach(b =>
+    b.addEventListener('click', () => chatSend(presets[+b.dataset.i][1])));
   drawChat();
+}
+
+// ---------- 推送 ----------
+function urlB64ToUint8Array(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+async function getPushSubs() {
+  try {
+    const f = await fetchFile('reports/push-sub.json');
+    return JSON.parse(f.text).subscriptions || [];
+  } catch { return []; }
+}
+async function savePushSubs(subs) {
+  await writeFile('reports/push-sub.json',
+    JSON.stringify({ subscriptions: subs }, null, 1), 'app: 更新推送订阅');
+}
+async function togglePush(btn) {
+  btn.disabled = true;
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window))
+      throw new Error('此浏览器不支持 Web Push');
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (sub) { // 关闭
+      await sub.unsubscribe();
+      const subs = (await getPushSubs()).filter(s => s.endpoint !== sub.endpoint);
+      await savePushSubs(subs);
+      btn.textContent = '🔔 开启推送';
+      toast('推送已关闭');
+    } else {    // 开启
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') throw new Error('通知权限被拒绝');
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC),
+      });
+      const subs = await getPushSubs();
+      subs.push(sub.toJSON());
+      await savePushSubs(subs);
+      btn.textContent = '🔕 关闭推送';
+      toast('✓ 推送已开启（今晚 21:00 见）');
+    }
+  } catch (e) { toast('推送设置失败：' + e.message, true); }
+  btn.disabled = false;
+}
+async function initPushBtn() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) $('#btn-push').textContent = '🔕 关闭推送';
+  } catch { /* ignore */ }
 }
 
 // ---------- 设置 ----------
@@ -324,9 +459,9 @@ function fillSettings() {
   $('#set-usage').textContent = usageSummary();
 }
 function bindSettings() {
-  $('#btn-save-settings').addEventListener('click', async () => {
+  const saveAndConnect = async () => {
     settings.save({
-      pat: $('#set-pat').value.trim(),
+      pat: ($('#set-pat').value || $('#ob-pat').value).trim(),
       repo: $('#set-repo').value.trim(),
       glmKey: $('#set-glm').value.trim(),
       glmBase: $('#set-glmbase').value.trim(),
@@ -339,11 +474,13 @@ function bindSettings() {
       $('#conn').textContent = settings.load().repo;
       $('#conn').classList.add('on');
       toast('✓ 连接成功');
-      await loadTree();
-      await renderAll();
-      show('dashboard');
+      await refreshAll(true);
+      show('today');
     } catch (e) { toast('连接失败：' + e.message, true); }
-  });
+  };
+  $('#btn-save-settings').addEventListener('click', saveAndConnect);
+  $('#ob-save').addEventListener('click', () => { $('#set-pat').value = $('#ob-pat').value; saveAndConnect(); });
+  $('#btn-push').addEventListener('click', e => togglePush(e.currentTarget));
   $('#btn-clear-local').addEventListener('click', () => {
     if (!confirm('清空本浏览器保存的全部设置与聊天记录？')) return;
     Object.keys(localStorage).filter(k => k.startsWith('pp_')).forEach(k => localStorage.removeItem(k));
@@ -351,38 +488,100 @@ function bindSettings() {
   });
 }
 
-// ---------- 全局刷新与启动 ----------
-async function renderAll() {
-  renderDashboard();
-  renderReports();
-  renderCalendar();
-  renderFileList();
+// ---------- 刷新 / 快捷键 / 下拉刷新 ----------
+async function refreshAll(full = false) {
+  await loadTree();
+  state.stateData = state.statsData = null;
+  state.fileCache = {}; // bot 可能已更新文件，强制重拉
+  $('#today-body').dataset.loaded = '';
+  $('#plan-body').dataset.loaded = '';
+  $('#inbox-body').dataset.loaded = '';
+  state.chatContext = null;
+  await renderDocs();
+  await renderToday();
+  $('#today-body').dataset.loaded = '1';
 }
-function bindNav() {
-  $$('.tab-btn').forEach(b => b.addEventListener('click', () => show(b.dataset.tab)));
-  $('#fab').addEventListener('click', openCapture);
-  $('#capture-cancel').addEventListener('click', closeCapture);
-  $('#capture-save').addEventListener('click', captureSubmit);
-  $('#btn-edit').addEventListener('click', toggleEditor);
-  $('#btn-save').addEventListener('click', saveFile);
-  $('#btn-close-file').addEventListener('click', () => {
-    $('#file-viewer').classList.remove('on');
+let gChord = false;
+function bindKeys() {
+  document.addEventListener('keydown', e => {
+    const typing = /INPUT|TEXTAREA|SELECT/.test(e.target.tagName);
+    if (e.key === 'Escape') { $('#file-viewer').classList.remove('on'); return; }
+    if (typing || e.metaKey || e.ctrlKey) return;
+    if (gChord) {
+      gChord = false;
+      const map = { t: 'today', p: 'plan', i: 'inbox', d: 'docs', c: 'chat', s: 'settings' };
+      if (map[e.key]) { show(map[e.key]); return; }
+    }
+    if (e.key === 'g') { gChord = true; setTimeout(() => gChord = false, 900); }
+    if (e.key === 'r') refreshAll().then(() => toast('已刷新'));
+    if (e.key === '/') { e.preventDefault(); show('inbox'); $('#inbox-input').focus(); }
+  });
+}
+function bindPTR() {
+  let startY = 0, pulling = false;
+  document.addEventListener('touchstart', e => {
+    if (document.scrollingElement.scrollTop === 0) startY = e.touches[0].clientY;
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    if (!startY) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy > 60 && !pulling) { pulling = true; $('#ptr').classList.add('on'); }
+  }, { passive: true });
+  document.addEventListener('touchend', () => {
+    if (pulling) { $('#ptr').classList.remove('on'); refreshAll().then(() => toast('已刷新')); }
+    startY = 0; pulling = false;
   });
 }
 
+// ---------- 启动 ----------
+function bindNav() {
+  $$('.tab-btn').forEach(b => b.addEventListener('click', () => show(b.dataset.tab)));
+  $$('.subtab').forEach(b => b.addEventListener('click', () => {
+    $$('.subtab').forEach(x => x.classList.toggle('active', x === b));
+    $('#doc-reports').classList.toggle('hidden', b.dataset.doc !== 'reports');
+    $('#doc-files').classList.toggle('hidden', b.dataset.doc !== 'files');
+  }));
+  $('#btn-refresh').addEventListener('click', () => refreshAll().then(() => toast('已刷新')));
+  $('#inbox-send').addEventListener('click', inboxSubmit);
+  $('#inbox-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); inboxSubmit(); }
+  });
+  $('#btn-close-file').addEventListener('click', () => $('#file-viewer').classList.remove('on'));
+  $('#btn-edit').addEventListener('click', () => setFileMode('edit'));
+  $('#btn-preview').addEventListener('click', () => setFileMode('preview'));
+  $('#btn-save').addEventListener('click', saveFile);
+  bindSettings(); bindChat(); bindKeys(); bindPTR();
+  window.addEventListener('online', flushOutbox);
+  // 深链恢复
+  const m = location.hash.match(/^#file=(.+)$/);
+  if (m) {
+    const path = decodeURIComponent(m[1]);
+    setTimeout(() => openFile(path), 600);
+  }
+}
 async function boot() {
-  bindNav(); bindSettings(); bindChat();
+  bindNav();
   const s = settings.load();
-  if (!s.pat) { show('settings'); fillSettings(); toast('先在设置里粘贴 GitHub PAT', true); return; }
+  fillSettings();
+  initPushBtn();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (!s.pat) { show('today'); toast('三步开始：粘贴 GitHub PAT', true); return; }
   try {
     await testConnection();
     $('#conn').textContent = s.repo;
     $('#conn').classList.add('on');
     await loadTree();
-    await renderAll();
-    show('dashboard');
+    // 并行：state + stats + inbox 预热
+    const jobs = [fetchJSON('reports/state.json').then(d => state.stateData = d).catch(() => {}),
+                  fetchJSON('reports/stats.json').then(d => state.statsData = d).catch(() => {}),
+                  fetchFile('inbox.md').catch(() => {})];
+    await busy(Promise.all(jobs));
+    await renderDocs();
+    show('today');
+    await renderToday();
+    flushOutbox();
   } catch (e) {
-    show('settings'); fillSettings();
+    show('today');
     toast('连接失败：' + e.message, true);
   }
 }

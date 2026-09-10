@@ -14,14 +14,16 @@ const SYSTEM_PROMPT = [
 ].join('\n');
 
 export async function buildContext(fetchText) {
-  const tree = await fetchText.tree();
+  // 并行拉取（原来串行 20+ 个文件要 10s+）
+  const tree = await fetchText.paths();
   const mdPaths = tree.filter(t => t.path.endsWith('.md')).map(t => t.path);
+  const texts = await Promise.all(mdPaths.map(p =>
+    fetchText.raw(p).then(t => ({ p, t })).catch(() => ({ p, t: '' }))));
   const parts = [];
   let total = 0;
-  for (const p of mdPaths) {
+  for (const { p, t } of texts) {
     if (total >= CONTEXT_TOTAL_CAP) break;
-    const text = await fetchText.raw(p);
-    const slice = text.slice(0, CONTEXT_FILE_CAP);
+    const slice = t.slice(0, CONTEXT_FILE_CAP);
     parts.push(`=== ${p} ===\n${slice}`);
     total += slice.length;
   }

@@ -1,5 +1,5 @@
-// sw.js — app shell 缓存（网络优先，离线兜底）；GitHub/GLM API 永不缓存
-const SHELL = 'pp-shell-v4';
+// sw.js — app shell 缓存（网络优先，离线兜底）+ Web Push 接收
+const SHELL = 'pp-shell-v5';
 const ASSETS = [
   './', './index.html', './style.css',
   './js/app.js', './js/api.js', './js/md.js', './js/chat.js', './js/store.js',
@@ -29,4 +29,24 @@ self.addEventListener('fetch', e => {
       })
       .catch(() => caches.match(e.request).then(hit => hit || caches.match('./index.html')))
   );
+});
+
+// ---- Web Push（iOS 16.4+ PWA / 桌面）----
+self.addEventListener('push', e => {
+  let data = { title: '🌙 规划', body: '' };
+  try { data = e.data ? e.data.json() : data; } catch { if (e.data) data.body = e.data.text(); }
+  e.waitUntil(self.registration.showNotification(data.title, {
+    body: data.body,
+    icon: './icons/icon-192.png',
+    badge: './icons/icon-192.png',
+    tag: 'planning',
+  }));
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    for (const c of list) if (c.url.includes('planning')) return c.focus();
+    return clients.openWindow('./');
+  }));
 });
