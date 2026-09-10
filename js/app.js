@@ -2,7 +2,7 @@
 // 数据流：GitHub( md + state.json + stats.json ) → state → render；写回 = 行级翻转/追加/整文件
 import { settings } from './store.js';
 import { testConnection, getTree, getContent, putContent } from './api.js';
-import { render as mdRender, flipCheckbox, escapeHtml } from './md.js';
+import { render as mdRender, flipCheckbox, escapeHtml, inline } from './md.js';
 import { buildContext, sendChat, renderMessage, usageSummary } from './chat.js';
 
 const VAPID_PUBLIC = 'BPkee1I-7uyoJVE6Df3nIa9UqHT3vGKBnofIn7VwAWq9uuVbrHqLbaEOvDoiPCXVT7UdrSPtQBgl_Se44wCr-pE';
@@ -78,7 +78,7 @@ function bindCb(container) {
   });
 }
 const itemCard = it => {
-  const inner = `<span class="${it.d ? 'done' : ''}">${escapeHtml((it.s ? '⭐ ' : '') + it.t)}</span>`
+  const inner = `<span class="${it.d ? 'done' : ''}">${inline((it.s ? '⭐ ' : '') + it.t)}</span>`
     + `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}）</em>`;
   if (typeof it.d === 'boolean')
     return `<label class="cb" data-file="${it.f}" data-line="${it.l}">` +

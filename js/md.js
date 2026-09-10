@@ -6,7 +6,8 @@ export function escapeHtml(s) {
           .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function inline(text) {
+// 行内格式（先转义后加标记）：供状态条目卡片复用
+export function inline(text) {
   let t = escapeHtml(text);
   t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   t = t.replace(/\*([^*]+)\*/g, '<em>$1</em>');
