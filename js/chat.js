@@ -50,7 +50,8 @@ export async function sendChat(userText, context, history) {
     model: s.model,
     messages,
     temperature: 0.6,
-    max_tokens: 2000,
+    // 思考模式下 reasoning 与正文共用输出预算，小帽会被思考耗光导致正文为空
+    max_tokens: 8192,
   };
   if (s.model === 'glm-5.3' && s.thinking === 'enabled') {
     body.thinking = { type: 'enabled' };
@@ -80,7 +81,14 @@ export async function sendChat(userText, context, history) {
   const data = await res.json();
   const u = data.usage || {};
   addUsage(u.prompt_tokens || 0, u.completion_tokens || 0);
-  return data.choices[0].message.content || '';
+  const choice = data.choices[0] || {};
+  const msg = choice.message || {};
+  const content = msg.content || '';
+  const reasoning = msg.reasoning_content || '';
+  if (!content && !reasoning) {
+    throw new Error(`GLM 返回空响应（finish=${choice.finish_reason}），请重试`);
+  }
+  return { content, reasoning, finish: choice.finish_reason };
 }
 
 export function renderMessage(text) {

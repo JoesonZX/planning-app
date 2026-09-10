@@ -1,7 +1,7 @@
 // app.js — 视图、路由、写回交互（移动优先）
 import { settings } from './store.js';
 import { testConnection, getTree, getContent, putContent } from './api.js';
-import { render as mdRender, flipCheckbox } from './md.js';
+import { render as mdRender, flipCheckbox, escapeHtml } from './md.js';
 import { buildContext, sendChat, renderMessage, usageSummary } from './chat.js';
 
 const state = { tree: [], fileCache: {}, currentFile: null, chatContext: null };
@@ -240,19 +240,34 @@ async function ensureChatContext() {
     $('#chat-status').textContent = `上下文就绪（${(state.chatContext.length / 1000).toFixed(0)}k 字符）`;
   } catch (e) { $('#chat-status').textContent = '上下文加载失败：' + e.message; }
 }
-function pushMessage(role, content) {
+function pushMessage(role, content, reasoning) {
   const h = JSON.parse(localStorage.getItem('pp_chat') || '[]');
-  h.push({ role, content });
+  h.push({ role, content, reasoning: reasoning || undefined });
   localStorage.setItem('pp_chat', JSON.stringify(h.slice(-40)));
 }
 function drawChat() {
   const el = $('#chat-messages');
   const h = JSON.parse(localStorage.getItem('pp_chat') || '[]');
-  el.innerHTML = h.map(m => `
+  el.innerHTML = h.map(m => {
+    let body;
+    if (m.role === 'assistant') {
+      let main = m.content
+        ? renderMessage(m.content)
+        : '<span class="dim">（正文为空——思考未完成即截断，可重试；思考过程见下方）</span>';
+      if (m.reasoning) {
+        main += `<details class="reason"><summary>💭 思考过程</summary>` +
+          `<div class="reason-body">${escapeHtml(m.reasoning)}</div></details>`;
+      }
+      body = main;
+    } else {
+      body = m.content.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    }
+    return `
     <div class="msg ${m.role}">
-      <div class="bubble">${m.role === 'assistant' ? renderMessage(m.content) : m.content.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>
-      ${m.role === 'assistant' ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : ''}
-    </div>`).join('');
+      <div class="bubble">${body}</div>
+      ${m.role === 'assistant' && m.content ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : ''}
+    </div>`;
+  }).join('');
   el.scrollTop = el.scrollHeight;
   el.querySelectorAll('.to-inbox').forEach(b => b.addEventListener('click', async () => {
     const text = b.closest('.msg').querySelector('.bubble').innerText.slice(0, 800);
@@ -275,7 +290,7 @@ async function chatSend() {
     const history = JSON.parse(localStorage.getItem('pp_chat') || '[]')
       .slice(0, -1).filter(m => m.role === 'user' || m.role === 'assistant');
     const reply = await sendChat(text, state.chatContext || '', history);
-    pushMessage('assistant', reply);
+    pushMessage('assistant', reply.content, reply.reasoning);
     drawChat();
     $('#chat-usage').textContent = usageSummary();
     errEl.textContent = '';

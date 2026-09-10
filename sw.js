@@ -1,5 +1,5 @@
 // sw.js — app shell 缓存（网络优先，离线兜底）；GitHub/GLM API 永不缓存
-const SHELL = 'pp-shell-v3';
+const SHELL = 'pp-shell-v4';
 const ASSETS = [
   './', './index.html', './style.css',
   './js/app.js', './js/api.js', './js/md.js', './js/chat.js', './js/store.js',
