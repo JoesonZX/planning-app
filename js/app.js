@@ -307,7 +307,123 @@ function renderInto(container, text, path) {
   });
 }
 
-// ---------- 聊天 ----------
+// ---------- 聊天提案（v5.1：LLM 提案 → diff 审查 → 手动应用，git 兜底） ----------
+const PROPOSAL_RE = /```planning-update\npath:[ \t]*(.+)\nnote:[ \t]*(.*)\n---\n([\s\S]*?)```/g;
+const propStore = new Map();   // key -> {path, note, body}
+
+function propKey(path, body) {
+  let h = 5381;
+  const s = path + '\n' + body.slice(0, 400);
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return 'p' + h.toString(36);
+}
+function propDecisions() {
+  return JSON.parse(localStorage.getItem('pp_propdec') || '{}');
+}
+function propDecide(key, what) {
+  const d = propDecisions();
+  d[key] = what;
+  localStorage.setItem('pp_propdec', JSON.stringify(d));
+}
+function parseProposals(content) {
+  const out = [];
+  const re = new RegExp(PROPOSAL_RE.source, 'g');
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const path = m[1].trim();
+    if (!path.endsWith('.md')) continue;   // 只允许 .md（写守卫的一部分）
+    out.push({ path, note: m[2].trim(), body: m[3].replace(/\n+$/, '') });
+  }
+  return out;
+}
+// 行级 diff（LCS；带行数上限，超限退化为摘要）
+function diffLines(oldS, newS) {
+  const a = oldS.split('\n'), b = newS.split('\n');
+  const n = a.length, m = b.length;
+  if (n * m > 1200000) return null;
+  const dp = new Int32Array((n + 1) * (m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i * (m + 1) + j] = a[i] === b[j]
+        ? dp[(i + 1) * (m + 1) + j + 1] + 1
+        : Math.max(dp[(i + 1) * (m + 1) + j], dp[i * (m + 1) + j + 1]);
+  const rows = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { rows.push({ t: ' ', s: a[i] }); i++; j++; }
+    else if (dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + j + 1]) { rows.push({ t: '-', s: a[i] }); i++; }
+    else { rows.push({ t: '+', s: b[j] }); j++; }
+  }
+  while (i < n) rows.push({ t: '-', s: a[i++] });
+  while (j < m) rows.push({ t: '+', s: b[j++] });
+  // 折叠：只保留变更行 ±2 行上下文
+  const keep = new Set();
+  rows.forEach((r, k) => { if (r.t !== ' ') for (let x = k - 2; x <= k + 2; x++) keep.add(x); });
+  const out = [];
+  let skip = false;
+  rows.forEach((r, k) => {
+    if (keep.has(k)) { out.push({ ...r, k }); skip = false; }
+    else if (!skip) { out.push({ t: '…', s: '' }); skip = true; }
+  });
+  return out;
+}
+function proposalCard(p) {
+  const key = propKey(p.path, p.body);
+  propStore.set(key, p);
+  const dec = propDecisions()[key];
+  if (dec === 'ignored') return '';
+  if (dec === 'applied')
+    return `<div class="prop done">✓ 已应用到 ${escapeHtml(p.path)}（git 可 revert）</div>`;
+  const oldText = state.fileCache[p.path]?.text;
+  const stat = oldText
+    ? `<span class="pstat">${oldText.split('\n').length} → ${p.body.split('\n').length} 行</span>` : '';
+  return `<div class="prop" data-key="${key}">
+    <div class="prop-head">📋 提案 · ${escapeHtml(p.path)} ${stat}</div>
+    ${p.note ? `<div class="prop-note">${escapeHtml(p.note)}</div>` : ''}
+    <details class="prop-diff"><summary>查看 diff</summary><div class="diffbody">（展开时计算）</div></details>
+    <div class="prop-actions">
+      <button class="mini primary-mini prop-apply" data-key="${key}">✓ 应用</button>
+      <button class="mini prop-ignore" data-key="${key}">忽略</button>
+    </div></div>`;
+}
+function bindProposals(container) {
+  container.querySelectorAll('.prop-diff').forEach(d => {
+    if (d.dataset.bound) return;
+    d.dataset.bound = '1';
+    d.addEventListener('toggle', async () => {
+      if (!d.open || d.querySelector('.drow')) return;
+      const card = d.closest('.prop');
+      const p = propStore.get(card.dataset.key);
+      const cur = state.fileCache[p.path]?.text ?? (await fetchFile(p.path).catch(() => null))?.text ?? '';
+      const rows = diffLines(cur, p.body);
+      const box = d.querySelector('.diffbody');
+      if (!rows) { box.textContent = '文件过大，diff 略——请用「查看完整提案」人工核对'; return; }
+      box.innerHTML = rows.map(r =>
+        `<div class="drow ${r.t === '+' ? 'add' : r.t === '-' ? 'del' : ''}">${escapeHtml(r.s) || '&nbsp;'}</div>`).join('');
+    });
+  });
+  container.querySelectorAll('.prop-apply').forEach(b => b.addEventListener('click', () =>
+    applyProposal(b.dataset.key)));
+  container.querySelectorAll('.prop-ignore').forEach(b => b.addEventListener('click', () => {
+    propDecide(b.dataset.key, 'ignored'); drawChat();
+  }));
+}
+async function applyProposal(key) {
+  const p = propStore.get(key);
+  if (!p) return;
+  try {
+    const cur = await fetchFile(p.path);
+    const curN = cur.text.split('\n').length, newN = p.body.split('\n').length;
+    if (newN < curN * 0.8 &&
+        !confirm(`提案只有 ${newN} 行，当前文件 ${curN} 行——可能是上下文截断导致内容丢失。确定覆盖？`))
+      return;
+    await busy(writeFile(p.path, p.body, `app: 聊天提案更新 ${p.path}`));
+    propDecide(key, 'applied');
+    drawChat();
+    vibrate();
+    toast('✓ 已应用到 ' + p.path + '（git revert 可撤销）');
+  } catch (e) { toast('应用失败：' + e.message, true); }
+}
 async function ensureChatContext() {
   const s = settings.load();
   $('#chat-model').value = s.model;
@@ -337,21 +453,24 @@ function drawChat() {
   el.innerHTML = h.map(m => {
     let body;
     if (m.role === 'assistant') {
-      let main = m.content
-        ? renderMessage(m.content)
-        : `<span class="dim">（正文为空——思考未完成即截断）</span>` +
-          `<button class="mini retry-empty">↻ 重试这条</button>`;
+      const props = parseProposals(m.content || '');
+      const text = props.length ? (m.content || '').replace(PROPOSAL_RE, '').trim() : (m.content || '');
+      let main = text ? renderMessage(text)
+        : (props.length ? '' : `<span class="dim">（正文为空——思考未完成即截断）</span>` +
+          `<button class="mini retry-empty">↻ 重试这条</button>`);
+      for (const p of props) main += proposalCard(p);
       if (m.reasoning)
         main += `<details class="reason"><summary>💭 思考过程</summary>` +
           `<div class="reason-body">${escapeHtml(m.reasoning)}</div></details>`;
       body = main;
     } else body = escapeHtml(m.content);
     return `<div class="msg ${m.role}"><div class="bubble">${body}</div>` +
-      (m.role === 'assistant' && m.content ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : '') + `</div>`;
+      (m.role === 'assistant' && m.content && !parseProposals(m.content).length ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : '') + `</div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
   el.querySelectorAll('.retry-empty').forEach(b =>
     b.addEventListener('click', retryLastChat));
+  bindProposals(el);
   el.querySelectorAll('.to-inbox').forEach(b => b.addEventListener('click', async () => {
     const text = b.closest('.msg').querySelector('.bubble').innerText.slice(0, 800);
     try {
@@ -406,6 +525,7 @@ function bindChat() {
   $('#chat-clear').addEventListener('click', () => { localStorage.removeItem('pp_chat'); drawChat(); toast('聊天记录已清空'); });
   const presets = [
     ['📊 周日复盘', '请带我做完本周复盘：1) 从 vault 列出本周完成与滑落；2) 一次一个地问我三个关于下周的问题，等我回答；3) 最后汇总「下周三件事」，每件带何时/何地。'],
+    ['📅 落进规划', '回顾我们最近的对话（若本次对话为空则基于 vault 现状），把应当落进规划文件的更新整理成 planning-update 提案块（每个文件一个完整提案，note 说明理由）。情绪与感情文件不要动。'],
     ['☀️ 今天做什么', '基于今天的日期和 vault，告诉我今天最该做的三件事和顺序，一句话理由。'],
     ['🗺️ 怎么用这个系统', '用 5 句话向新用户解释这个 app 各 tab 的用途和自动化流程。'],
   ];
