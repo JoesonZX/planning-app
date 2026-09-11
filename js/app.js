@@ -339,7 +339,8 @@ function drawChat() {
     if (m.role === 'assistant') {
       let main = m.content
         ? renderMessage(m.content)
-        : '<span class="dim">（正文为空——思考未完成即截断，可重试）</span>';
+        : `<span class="dim">（正文为空——思考未完成即截断）</span>` +
+          `<button class="mini retry-empty">↻ 重试这条</button>`;
       if (m.reasoning)
         main += `<details class="reason"><summary>💭 思考过程</summary>` +
           `<div class="reason-body">${escapeHtml(m.reasoning)}</div></details>`;
@@ -349,6 +350,8 @@ function drawChat() {
       (m.role === 'assistant' && m.content ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : '') + `</div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
+  el.querySelectorAll('.retry-empty').forEach(b =>
+    b.addEventListener('click', retryLastChat));
   el.querySelectorAll('.to-inbox').forEach(b => b.addEventListener('click', async () => {
     const text = b.closest('.msg').querySelector('.bubble').innerText.slice(0, 800);
     try {
@@ -357,6 +360,21 @@ function drawChat() {
       b.textContent = '✓ 已入 inbox'; b.disabled = true;
     } catch (e) { toast('写入失败：' + e.message, true); }
   }));
+}
+async function retryLastChat() {
+  // 重试最后一条：剥掉尾部空 assistant 消息，取最后一条 user 文本，重新走 chatSend
+  const h = JSON.parse(localStorage.getItem('pp_chat') || '[]');
+  while (h.length && h[h.length - 1].role === 'assistant' && !h[h.length - 1].content) h.pop();
+  let idx = -1;
+  for (let i = h.length - 1; i >= 0; i--) {
+    if (h[i].role === 'user') { idx = i; break; }
+  }
+  if (idx < 0) return;
+  const text = h[idx].content;
+  h.length = idx;  // 该 user 消息及之后全部移除，chatSend 会重新推入
+  localStorage.setItem('pp_chat', JSON.stringify(h));
+  drawChat();
+  chatSend(text);
 }
 async function chatSend(preset) {
   const input = $('#chat-input');
@@ -368,8 +386,10 @@ async function chatSend(preset) {
   errEl.textContent = '思考中…';
   try {
     const history = JSON.parse(localStorage.getItem('pp_chat') || '[]')
-      .slice(0, -1).filter(m => m.role === 'user' || m.role === 'assistant');
+      .slice(0, -1).filter(m => (m.role === 'user' || m.role === 'assistant')
+        && m.content && m.content.trim());
     const reply = await sendChat(text, state.chatContext || '', history);
+    if (reply.retried) toast('思考耗尽了输出预算，已自动关思考重试成功');
     pushMessage('assistant', reply.content, reply.reasoning);
     drawChat();
     $('#chat-usage').textContent = usageSummary();

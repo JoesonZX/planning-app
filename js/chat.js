@@ -46,12 +46,14 @@ export async function sendChat(userText, context, history) {
     throw new Error('本月聊天预算已用完（可在设置里调高或改单价），已阻止 5.3 调用。可切换 glm-5.3-flash（免费）。');
   }
 
+  // 空正文的历史消息（旧版截断残留）不进上下文——空 content 可能被 API 拒收
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT + '\n\n' + context },
-    ...history.slice(-16).map(h => ({ role: h.role, content: h.content })),
+    ...history.filter(h => h.content && h.content.trim()).slice(-16)
+      .map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content: userText },
   ];
-  const body = {
+  const base = {
     model: s.model,
     messages,
     temperature: 0.6,
@@ -59,41 +61,67 @@ export async function sendChat(userText, context, history) {
     max_tokens: 8192,
   };
   if (s.model === 'glm-5.3' && s.thinking === 'enabled') {
-    body.thinking = { type: 'enabled' };
+    base.thinking = { type: 'enabled' };
   }
 
   const url = (s.glmBase || 'https://open.bigmodel.cn/api/coding/paas/v4')
     .replace(/\/+$/, '') + '/chat/completions';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${s.glmKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let msg = `GLM ${res.status}`;
+
+  const doCall = async body => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${s.glmKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let msg = `GLM ${res.status}`;
+      try {
+        const e = await res.json();
+        if (e.error?.code === '1113' || /余额不足/.test(e.error?.message || '')) {
+          msg = `模型 ${s.model} 需要 bigmodel 账户余额（错误 1113）。请充值、切换 glm-5.3-flash，或在设置里调整。`;
+        } else if (res.status === 429) {
+          msg = '限流了，稍等几秒再试。' + (e.error?.message || '');
+        } else {
+          msg = `GLM ${res.status}: ${e.error?.message || res.statusText}`;
+        }
+      } catch { /* keep default */ }
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    const u = data.usage || {};
+    addUsage(u.prompt_tokens || 0, u.completion_tokens || 0);
+    const choice = data.choices[0] || {};
+    return {
+      content: choice.message?.content || '',
+      reasoning: choice.message?.reasoning_content || '',
+      finish: choice.finish_reason,
+    };
+  };
+
+  let r = await doCall(base);
+  // 正文空但思考非空 = 思考吃光了输出预算（finish=length 或服务端截断）。
+  // 自动降级重试一次：关思考 + 加大预算；thinking 参数被拒（400）再去掉参数裸试。
+  if (!r.content && r.reasoning) {
     try {
-      const e = await res.json();
-      if (e.error?.code === '1113' || /余额不足/.test(e.error?.message || '')) {
-        msg = `模型 ${s.model} 需要 bigmodel 账户余额（错误 1113）。请充值、切换 glm-5.3-flash，或在设置里调整。`;
-      } else if (res.status === 429) {
-        msg = '限流了，稍等几秒再试。' + (e.error?.message || '');
-      } else {
-        msg = `GLM ${res.status}: ${e.error?.message || res.statusText}`;
-      }
-    } catch { /* keep default */ }
-    throw new Error(msg);
+      r = await doCall({ ...base, max_tokens: 16384, thinking: { type: 'disabled' } });
+    } catch (e1) {
+      if (!/GLM 4\d\d/.test(e1.message)) throw e1;
+      const bare = { ...base, max_tokens: 16384 };
+      delete bare.thinking;
+      r = await doCall(bare);
+    }
+    r.retried = true;
   }
-  const data = await res.json();
-  const u = data.usage || {};
-  addUsage(u.prompt_tokens || 0, u.completion_tokens || 0);
-  const choice = data.choices[0] || {};
-  const msg = choice.message || {};
-  const content = msg.content || '';
-  const reasoning = msg.reasoning_content || '';
-  if (!content && !reasoning) {
-    throw new Error(`GLM 返回空响应（finish=${choice.finish_reason}），请重试`);
+  if (!r.content && !r.reasoning) {
+    throw new Error(`GLM 返回空响应（finish=${r.finish}），请重试`);
   }
-  return { content, reasoning, finish: choice.finish_reason };
+  if (!r.content) {
+    throw new Error('思考耗尽了输出预算（重试后仍无正文）——请关闭思考开关或换 glm-5.3-flash 后重试');
+  }
+  if (r.finish === 'length') {
+    r.content += '\n\n*（达到长度上限被截断——可发「继续」）*';
+  }
+  return r;
 }
 
 export function renderMessage(text) {
