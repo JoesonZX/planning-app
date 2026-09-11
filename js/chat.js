@@ -15,8 +15,11 @@ const SYSTEM_PROMPT = [
 
 export async function buildContext(fetchText) {
   // 并行拉取（原来串行 20+ 个文件要 10s+）
+  // briefs/ 是引擎生成的任务简报（会持续增长），不进聊天上下文——
+  // 别让生成物挤占用户真实文件的 120k 预算（reports/ 排序在 规划/ 之前）
   const tree = await fetchText.paths();
-  const mdPaths = tree.filter(t => t.path.endsWith('.md')).map(t => t.path);
+  const mdPaths = tree.filter(t =>
+    t.path.endsWith('.md') && !t.path.startsWith('reports/briefs/')).map(t => t.path);
   const texts = await Promise.all(mdPaths.map(p =>
     fetchText.raw(p).then(t => ({ p, t })).catch(() => ({ p, t: '' }))));
   const parts = [];
