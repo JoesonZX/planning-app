@@ -121,6 +121,9 @@ async function renderToday() {
   el.dataset.loaded = '1';
   try {
     const sd = state.stateData || (state.stateData = await fetchJSON('reports/state.json'));
+    if (!state.statsData) {
+      try { state.statsData = await fetchJSON('reports/stats.json'); } catch { /* 无热力图数据不致命 */ }
+    }
     const today = sd.today;
     let html = `<h2 class="sec">☀️ 今天 · ${fmtDay(today)}</h2>`;
     // 时间线
