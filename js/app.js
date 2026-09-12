@@ -79,7 +79,7 @@ function bindCb(container) {
     input.addEventListener('change', () =>
       toggleStateItem(input.dataset.file, +input.dataset.line, input));
   });
-  // 任务卡菜单：⋯ → 删除 / 改期（直接写回，不经 LLM）
+  // 任务卡菜单：⋯ → 删除 / 改期（直接写回，不经 LLM；成功后本地补丁刷新视图）
   container.querySelectorAll('.tmenu').forEach(b => b.addEventListener('click', e => {
     e.preventDefault();
     const f = b.dataset.f, l = +b.dataset.l;
@@ -87,15 +87,30 @@ function bindCb(container) {
     if (!ans) return;
     if (ans.trim() === '删') {
       busy(writeFile(f, cur => cur.split('\n').filter((_, i) => i !== l - 1).join('\n'),
-        `app: 删除任务 ${f}:${l}`)).then(() => { vibrate(); toast('已删除'); refreshAll(); })
+        `app: 删除任务 ${f}:${l}`)).then(() => { vibrate(); toast('已删除'); patchLocalRemove(f, l); })
         .catch(err => toast('删除失败：' + err.message, true));
     } else {
       const nd = ans.trim().match(/^(\d{1,2})[\/.](\d{1,2})$/);
       if (!nd) { toast('没看懂——「删」或新日期如 9/20', true); return; }
-      busy(writeFile(f, cur => cur.split('\n').map((ln, i) =>
-        i === l - 1 ? ln.replace(/(\d{1,2})[.\/](\d{1,2})/, `${+nd[1]}/${+nd[2]}`) : ln
-      ).join('\n'), `app: 任务改期 ${f}:${l} → ${+nd[1]}/${+nd[2]}`))
-        .then(() => { vibrate(); toast('✓ 已改期'); refreshAll(); })
+      busy(writeFile(f, cur => {
+        const lines = cur.split('\n');
+        if (l - 1 >= lines.length) throw new Error('行号已失效，请刷新');
+        const before = lines[l - 1];
+        const after = before.replace(/(\d{1,2})[.\/](\d{1,2})/, `${+nd[1]}/${+nd[2]}`);
+        if (after === before) throw new Error('该行没有 M/D 日期可改');
+        lines[l - 1] = after;
+        return lines.join('\n');
+      }, `app: 任务改期 ${f}:${l} → ${+nd[1]}/${+nd[2]}`))
+        .then(() => {
+          vibrate(); toast('✓ 已改期');
+          const moved = state.fileCache[f]?.lines?.[l - 1];
+          patchLocalRemove(f, l);
+          if (moved) patchLocalInsert({
+            t: moved.replace(/^[-*]\s+\[[ xX]\]\s*/, ''),
+            s: moved.includes('⭐'), d: /\[x\]/i.test(moved), f, l,
+            dates: [`${new Date().getFullYear()}-${String(+nd[1]).padStart(2, '0')}-${String(+nd[2]).padStart(2, '0')}`],
+          });
+        })
         .catch(err => toast('改期失败：' + err.message, true));
     }
   }));
@@ -103,7 +118,12 @@ function bindCb(container) {
   container.querySelectorAll('.tconv').forEach(b => b.addEventListener('click', () => {
     const f = b.dataset.f, t = b.dataset.t;
     busy(writeFile(f, cur => cur.replace(/\s*$/, '') + `\n- [ ] ${t}（转自日程）\n`,
-      'app: 日程转任务')).then(() => { vibrate(); toast('✓ 已登记为任务'); refreshAll(); })
+      'app: 日程转任务')).then(() => {
+      vibrate(); toast('✓ 已登记为任务（无日期，周报/滑落跟踪）');
+      const cached = state.fileCache[f];
+      const lineNo = cached ? cached.lines.findIndex(ln => ln.includes(t.slice(0, 20)) && ln.includes('转自日程')) : -1;
+      patchLocalInsert({ t: `${t}（转自日程）`, s: false, d: false, f, l: lineNo + 1, dates: [state.stateData?.today] });
+    })
       .catch(err => toast('失败：' + err.message, true));
   }));
 }
@@ -263,9 +283,13 @@ function showStripDetail(k) {
     `<button class="mini strip-close">收起</button>`;
   d.querySelector('.strip-del').addEventListener('click', async () => {
     try {
-      await busy(writeFile('inbox.md',
-        cur => cur.split('\n').filter((_, i) => i !== o.i).join('\n'),
-        'app: 删除 inbox 条目'));
+      await busy(writeFile('inbox.md', cur => {
+        const lines = cur.split('\n');
+        // 按内容定位（渲染到点击之间可能新增过条目，索引会漂移）
+        const idx = lines.findIndex(x => x.trim() === o.x);
+        if (idx < 0) throw new Error('该条已变化，请刷新');
+        return lines.filter((_, i) => i !== idx).join('\n');
+      }, 'app: 删除 inbox 条目'));
       vibrate();
       toast('已删除');
       renderInboxStrip();
@@ -334,7 +358,35 @@ async function flushOutbox() {
   } catch { /* 下次再试 */ }
   finally { outboxFlushing = false; }
 }
-// 直通添加任务（不经 LLM，sha 冲突安全）
+// 直通任务 CRUD（不经 LLM，sha 冲突安全）
+// 本地补丁：直通操作改的是 md 文件，state.json 要等引擎（6/9/21 点）才重算——
+// 在前端同步打补丁让操作即时可见，引擎数据到位后自然覆盖
+function rerenderTaskViews() {
+  $('#today-body').dataset.loaded = '';
+  $('#plan-body').dataset.loaded = '';
+  if ($('#view-today').classList.contains('active')) renderToday();
+  if ($('#view-plan').classList.contains('active')) { renderPlan(); renderDocs(); }
+}
+function patchLocalRemove(f, l) {
+  const sd = state.stateData;
+  if (!sd) return rerenderTaskViews();
+  sd.today_items = (sd.today_items || []).filter(it => !(it.f === f && it.l === l));
+  (sd.week || []).forEach(g => { g.items = (g.items || []).filter(it => !(it.f === f && it.l === l)); });
+  sd.stale = (sd.stale || []).filter(it => !(it.f === f && it.l === l));
+  rerenderTaskViews();
+}
+function patchLocalInsert(item) {
+  const sd = state.stateData;
+  if (!sd) return rerenderTaskViews();
+  const d = (item.dates || [])[0];
+  if (d === sd.today) sd.today_items.push(item);
+  else if (d && d > sd.today) {
+    let g = (sd.week || []).find(x => x.date === d);
+    if (!g) { g = { date: d, items: [], sched: [] }; sd.week.push(g); sd.week.sort((a, b) => a.date < b.date ? -1 : 1); }
+    g.items.push(item);
+  }
+  rerenderTaskViews();
+}
 async function addTaskDirect() {
   const text = $('#nt-text').value.trim();
   if (!text) return;
@@ -356,7 +408,15 @@ async function addTaskDirect() {
     btn.textContent = unchanged ? '已存在' : '✓ 已添加';
     $('#nt-text').value = '';
     setTimeout(() => { btn.textContent = '添加任务'; btn.disabled = false; }, 900);
-    refreshAll();
+    // 乐观上屏：从写回后的缓存定位行号，本地补丁进今天/计划视图
+    const cached = state.fileCache[file];
+    const lineNo = cached ? cached.lines.findIndex(ln => ln.includes(text) && ln.includes(dateStr)) : -1;
+    const [mm, dd] = dateStr.split('/').map(Number);
+    const y = new Date().getFullYear();
+    patchLocalInsert({
+      t: `${text}（${dateStr}）`, s: !!star, d: false, f: file,
+      l: lineNo + 1, dates: [`${y}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`],
+    });
   } catch (e) {
     btn.disabled = false; btn.textContent = '添加任务';
     toast('添加失败：' + e.message, true);

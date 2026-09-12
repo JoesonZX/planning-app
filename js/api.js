@@ -84,6 +84,7 @@ export async function putContent(path, textOrFn, sha, message) {
     if (isFn) {
       const cur = await getContent(path);
       const next = textOrFn(cur.text);
+      if (next == null) throw new Error('写回失败：目标行已变化（文件可能被他处更新），请刷新后重试');
       if (next === cur.text) return { sha: cur.sha, unchanged: true };  // 目标态已达成，不产生空提交
       return { sha: await attempt(next, cur.sha, message || `app: update ${path}`), unchanged: false };
     }
@@ -92,6 +93,7 @@ export async function putContent(path, textOrFn, sha, message) {
     if (e.status !== 409 && e.status !== 422) throw e;
     const fresh = await getContent(path);
     const next = isFn ? textOrFn(fresh.text) : textOrFn;
+    if (next == null) throw new Error('写回失败：目标行已变化，请刷新后重试');
     if (next === fresh.text) {
       // 冲突后目标态已达成（前次请求实际已生效）——绝不重发相同内容制造空提交
       return { sha: fresh.sha, unchanged: true };
