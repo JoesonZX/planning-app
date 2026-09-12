@@ -346,3 +346,13 @@ nav {
 .badge.b-star { background: var(--acc-dim); color: var(--acc); }
 .badge.b-hold { background: rgba(255, 149, 0, 0.12); color: var(--warn); }
 .badge.b-brief { background: var(--surface-2); color: var(--dim); }
+
+
+/* ---------- 日记 ---------- */
+.diary-text {
+  width: 100%; min-height: 52vh; background: var(--surface); color: var(--fg);
+  border: 1px solid transparent; border-radius: var(--r); padding: 12px;
+  font: 14px/1.7 inherit; resize: vertical; margin-top: 8px;
+}
+.diary-text:focus { border-color: var(--line-strong); }
+.diary-save { margin-top: 12px; }

@@ -4,6 +4,7 @@ import { settings } from './store.js';
 import { testConnection, getTree, getContent, putContent } from './api.js';
 import { render as mdRender, flipCheckbox, escapeHtml, inline } from './md.js';
 import { buildContext, sendChat, renderMessage, usageSummary } from './chat.js';
+import { openDiary } from './diary.js';
 
 const VAPID_PUBLIC = 'BPkee1I-7uyoJVE6Df3nIa9UqHT3vGKBnofIn7VwAWq9uuVbrHqLbaEOvDoiPCXVT7UdrSPtQBgl_Se44wCr-pE';
 const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六'];
@@ -43,11 +44,14 @@ async function fetchFile(path) {
   state.fileCache[path] = { text, sha, lines: text.split('\n') };
   return state.fileCache[path];
 }
-async function writeFile(path, text, message) {
+async function writeFile(path, textOrFn, message) {
   const cached = state.fileCache[path];
   const sha = cached ? cached.sha : (await getContent(path)).sha;
-  const newSha = await putContent(path, text, sha, message);
+  const { sha: newSha, unchanged } = await putContent(path, textOrFn, sha, message);
+  const text = typeof textOrFn === 'function'
+    ? (await getContent(path)).text : textOrFn;
   state.fileCache[path] = { text, sha: newSha, lines: text.split('\n') };
+  return { unchanged };
 }
 async function fetchJSON(path) {
   const f = await fetchFile(path);
@@ -58,10 +62,10 @@ async function fetchJSON(path) {
 async function toggleStateItem(file, lineNo, inputEl) {
   vibrate();
   try {
-    const cached = await fetchFile(file);
-    const newText = flipCheckbox(cached.lines, lineNo - 1); // parser 行号 1-based
-    if (newText === null) { inputEl.checked = !inputEl.checked; return; }
-    await writeFile(file, newText, `app: ${file} 行 ${lineNo} 勾选`);
+    await fetchFile(file);
+    await writeFile(file,
+      cur => flipCheckbox(cur.split('\n'), lineNo - 1)?.join('\n'),
+      `app: ${file} 行 ${lineNo} 勾选`);
     inputEl.closest('.cb')?.querySelector('span')?.classList.toggle('done', inputEl.checked);
     toast('✓ 已同步');
   } catch (e) {
@@ -75,14 +79,45 @@ function bindCb(container) {
     input.addEventListener('change', () =>
       toggleStateItem(input.dataset.file, +input.dataset.line, input));
   });
+  // 任务卡菜单：⋯ → 删除 / 改期（直接写回，不经 LLM）
+  container.querySelectorAll('.tmenu').forEach(b => b.addEventListener('click', e => {
+    e.preventDefault();
+    const f = b.dataset.f, l = +b.dataset.l;
+    const ans = prompt('删除这条任务请输「删」；改期请输入新日期（如 9/20）：', '');
+    if (!ans) return;
+    if (ans.trim() === '删') {
+      busy(writeFile(f, cur => cur.split('\n').filter((_, i) => i !== l - 1).join('\n'),
+        `app: 删除任务 ${f}:${l}`)).then(() => { vibrate(); toast('已删除'); refreshAll(); })
+        .catch(err => toast('删除失败：' + err.message, true));
+    } else {
+      const nd = ans.trim().match(/^(\d{1,2})[\/.](\d{1,2})$/);
+      if (!nd) { toast('没看懂——「删」或新日期如 9/20', true); return; }
+      busy(writeFile(f, cur => cur.split('\n').map((ln, i) =>
+        i === l - 1 ? ln.replace(/(\d{1,2})[.\/](\d{1,2})/, `${+nd[1]}/${+nd[2]}`) : ln
+      ).join('\n'), `app: 任务改期 ${f}:${l} → ${+nd[1]}/${+nd[2]}`))
+        .then(() => { vibrate(); toast('✓ 已改期'); refreshAll(); })
+        .catch(err => toast('改期失败：' + err.message, true));
+    }
+  }));
+  // 日程卡转正：把日程条目登记为真任务（追加 checkbox 行到同文件末尾）
+  container.querySelectorAll('.tconv').forEach(b => b.addEventListener('click', () => {
+    const f = b.dataset.f, t = b.dataset.t;
+    busy(writeFile(f, cur => cur.replace(/\s*$/, '') + `\n- [ ] ${t}（转自日程）\n`,
+      'app: 日程转任务')).then(() => { vibrate(); toast('✓ 已登记为任务'); refreshAll(); })
+      .catch(err => toast('失败：' + err.message, true));
+  }));
 }
-const itemCard = it => {
-  const inner = `<span class="${it.d ? 'done' : ''}">${inline((it.s ? '⭐ ' : '') + it.t)}</span>`
-    + `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}）</em>`;
+const itemCard = (it, opts = {}) => {
+  const inner = `<span class="${it.d ? 'done' : ''}">${inline((it.s ? '' : '') + it.t)}</span>`
+    + `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}${(it.src && it.src.length > 1) ? ` +${it.src.length - 1} 处重复` : ''}）</em>`;
   if (typeof it.d === 'boolean')
     return `<label class="cb" data-file="${it.f}" data-line="${it.l}">` +
-      `<input type="checkbox" ${it.d ? 'checked' : ''}>${inner}</label>`;
-  return `<div class="cb static">${inner}</div>`;
+      `<input type="checkbox" ${it.d ? 'checked' : ''}>${inner}` +
+      (opts.menu ? `<button class="mini tmenu" data-f="${it.f}" data-l="${it.l}" data-t="${escapeHtml((it.t || '').slice(0, 24))}">⋯</button>` : '') +
+      `</label>`;
+  return `<div class="cb static">${inner}` +
+    (opts.menu && opts.convert ? `<button class="mini tconv" data-f="${it.f}" data-t="${escapeHtml((it.t || '').slice(0, 60))}">转任务</button>` : '') +
+    `</div>`;
 };
 
 // ---------- 今天 ----------
@@ -133,13 +168,20 @@ async function renderToday() {
       html += '</div>';
     }
     html += sd.today_items.length
-      ? `<div class="cards">${sd.today_items.map(itemCard).join('')}</div>`
-      : emptyState('', '今天没有标注事项——把明天要做的提前想好');
+      ? `<div class="cards">${sd.today_items.map(it => itemCard(it, { menu: true })).join('')}</div>`
+      : emptyState('', '今天没有标注任务——把明天要做的提前想好');
+    if (sd.sched_today?.length) {
+      html += `<h2 class="sec">日程（按计划走，不算任务）</h2><div class="cards sched">${sd.sched_today.map(it => itemCard(it, { menu: false, convert: true })).join('')}</div>`;
+    }
+    html += `<div class="row"><button id="btn-diary" class="mini">记一笔今天</button></div>`;
     if (sd.stale.length)
       html += `<h2 class="sec">滑落（拖了很久）</h2><div class="cards">${sd.stale.map(itemCard).join('')}</div>`;
     if (state.statsData) html += renderHeatmap(state.statsData);
     el.innerHTML = html;
     bindCb(el);
+    const db = document.querySelector('#btn-diary');
+    if (db) db.addEventListener('click', () =>
+      openDiary({ put: (p, t, m) => writeFile(p, t, m), toast, dateStr: sd.today }));
   } catch (e) {
     el.innerHTML = emptyState('', 'state.json 还没生成——今晚 21:00 的晚间报告会带上它',
       e.message.includes('404') ? '' : `<p class="dim small">${e.message}</p>`);
@@ -149,6 +191,24 @@ async function renderToday() {
 // ---------- 计划 ----------
 async function renderPlan() {
   const el = $('#plan-body');
+  if (!$('#add-task-row')) {
+    el.parentElement.insertAdjacentHTML('afterbegin', `
+      <div id="add-task-row" class="capture-box">
+        <div class="row" style="margin-top:0">
+          <input id="nt-text" type="text" placeholder="新任务…（直接写回，不经 LLM）" style="flex:1">
+          <input id="nt-date" type="text" placeholder="M/D（默认今天）" style="width:110px">
+          <label class="think"><input type="checkbox" id="nt-star"> 硬节点</label>
+        </div>
+        <div class="row">
+          <select id="nt-file" style="flex:1">
+            <option value="规划/26fall 9月执行清单.md">26fall 9月执行清单</option>
+            <option value="规划/26 fall.md">26 fall</option>
+          </select>
+          <button id="nt-add" class="primary" style="width:auto;margin-top:0;padding:8px 18px">添加任务</button>
+        </div>
+      </div>`);
+    $('#nt-add').addEventListener('click', addTaskDirect);
+  }
   el.innerHTML = skeleton();
   el.dataset.loaded = '1';
   try {
@@ -158,8 +218,10 @@ async function renderPlan() {
     el.innerHTML = sd.week.map(g => {
       const d = new Date(g.date + 'T12:00:00');
       const rel = g.date === today ? '明天→' : '';
+      const sched = (g.sched || []).length
+        ? `<div class="cards sched">${g.sched.map(itemCard).join('')}</div>` : '';
       return `<h3 class="dayhead">${rel}${fmtDay(g.date)}</h3>
-        <div class="cards">${g.items.map(itemCard).join('')}</div>`;
+        <div class="cards">${g.items.map(it => itemCard(it, { menu: true })).join('')}</div>${sched}`;
     }).join('');
     bindCb(el);
   } catch (e) {
@@ -201,9 +263,9 @@ function showStripDetail(k) {
     `<button class="mini strip-close">收起</button>`;
   d.querySelector('.strip-del').addEventListener('click', async () => {
     try {
-      const cur = await fetchFile('inbox.md');
-      const kept = cur.text.split('\n').filter((_, i) => i !== o.i);
-      await busy(writeFile('inbox.md', kept.join('\n'), 'app: 删除 inbox 条目'));
+      await busy(writeFile('inbox.md',
+        cur => cur.split('\n').filter((_, i) => i !== o.i).join('\n'),
+        'app: 删除 inbox 条目'));
       vibrate();
       toast('已删除');
       renderInboxStrip();
@@ -233,11 +295,12 @@ async function recordDown() {
   strip.prepend(sync);
   input.value = ''; updateInputState();
   try {
-    const inbox = await fetchFile('inbox.md');
-    await writeFile('inbox.md', inbox.text.replace(/\s*$/, '') + '\n' + line + '\n', 'app: 随手记');
+    const { unchanged } = await writeFile('inbox.md',
+      cur => cur.replace(/\s*$/, '') + '\n' + line + '\n',
+      'app: 随手记');
     vibrate();
-    btn.textContent = '✓ 已记入';
-    setTimeout(() => { btn.textContent = '记下'; updateInputState(); noteBusy = false; }, 900);
+    btn.textContent = unchanged ? '已在（未重复记）' : '✓ 已记入';
+    setTimeout(() => { btn.textContent = '记下'; updateInputState(); noteBusy = false; }, 1100);
     renderInboxStrip();
     localStorage.setItem('pp_enterAction', 'note');
   } catch (e) {
@@ -255,16 +318,51 @@ function enqueueOffline(line) {
   localStorage.setItem('pp_outbox', JSON.stringify(q));
   toast('当前离线，已存本地，联网后自动同步');
 }
+let outboxFlushing = false;  // boot 与 online 事件会双触发，单飞锁防竞态
 async function flushOutbox() {
+  if (outboxFlushing) return;
   const q = JSON.parse(localStorage.getItem('pp_outbox') || '[]');
   if (!q.length || !settings.load().pat) return;
+  outboxFlushing = true;
   try {
-    const inbox = await fetchFile('inbox.md');
-    await writeFile('inbox.md', inbox.text.replace(/\s*$/, '') + '\n' + q.join('\n') + '\n', 'app: 离线补记');
+    await writeFile('inbox.md',
+      cur => cur.replace(/\s*$/, '') + '\n' + q.join('\n') + '\n',
+      'app: 离线补记');
     localStorage.removeItem('pp_outbox');
     toast(`✓ 已补记 ${q.length} 条离线内容`);
+    if ($('#view-assistant').classList.contains('active')) renderInboxStrip();
   } catch { /* 下次再试 */ }
+  finally { outboxFlushing = false; }
 }
+// 直通添加任务（不经 LLM，sha 冲突安全）
+async function addTaskDirect() {
+  const text = $('#nt-text').value.trim();
+  if (!text) return;
+  const file = $('#nt-file').value;
+  const dv = $('#nt-date').value.trim();
+  const today = new Date();
+  const m = dv.match(/^(\d{1,2})[\/.](\d{1,2})$/);
+  const dateStr = m ? `${+m[1]}/${+m[2]}` : `${today.getMonth() + 1}/${today.getDate()}`;
+  const star = $('#nt-star').checked ? '⭐' : '';
+  const btn = $('#nt-add');
+  btn.disabled = true; btn.textContent = '添加中…';
+  try {
+    const { unchanged } = await writeFile(file,
+      cur => cur.replace(/\s*$/, '') + `
+- [ ] ${star}${text}（${dateStr}）
+`,
+      `app: 添加任务 ${file}`);
+    vibrate();
+    btn.textContent = unchanged ? '已存在' : '✓ 已添加';
+    $('#nt-text').value = '';
+    setTimeout(() => { btn.textContent = '添加任务'; btn.disabled = false; }, 900);
+    refreshAll();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '添加任务';
+    toast('添加失败：' + e.message, true);
+  }
+}
+
 // ---------- 文档（报告 + 文件，住进「计划」子页） ----------
 async function renderDocs() {
   const reports = state.tree.filter(t =>
@@ -522,6 +620,7 @@ function drawChat() {
   // 落进规划：把该轮对话整理成提案（常驻入口；已有提案的消息不再给）
   el.querySelectorAll('.to-plan').forEach(b => b.addEventListener('click', () => {
     localStorage.setItem('pp_enterAction', 'ask');
+    $('#chat-status').textContent = '整理提案中——若 2 分钟内没有出现提案卡，请重试或用「记下」手记';
     chatSend('把我们最近的对话整理成 planning-update 提案块（每个文件一个，note 说明理由；情绪与感情文件不要动）。若没有值得落盘的内容，直接说明。');
   }));
 }

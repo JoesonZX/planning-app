@@ -63,34 +63,40 @@ export async function getContent(path) {
   return { text: b64ToText(data.content || ''), sha: data.sha };
 }
 
-// PUT 写回：sha 乐观并发。冲突时调用方可用 onConflict 重拉重试一次。
-export async function putContent(path, text, sha, message) {
+// PUT 写回。两种用法：
+//   putContent(path, text, sha, message)         —— 固定文本（整文件编辑/提案应用）
+//   putContent(path, fn, null, message)          —— 变换函数 fn(currentText)→newText
+//                                                   （追加/删行类操作必用：冲突时基于
+//                                                    服务器最新内容重算，杜绝丢更新与空提交）
+export async function putContent(path, textOrFn, sha, message) {
   const s = settings.load();
-  try {
+  const isFn = typeof textOrFn === 'function';
+  const attempt = async (bodyText, curSha, msg) => {
     const data = await gh(`/repos/${s.repo}/contents/${encodeURIComponent(path)}`, {
       method: 'PUT',
       body: JSON.stringify({
-        message: message || `app: update ${path}`,
-        content: textToB64(text),
-        sha,
-        branch: 'main',
+        message: msg, content: textToB64(bodyText), sha: curSha, branch: 'main',
       }),
     });
     return data.content.sha;
-  } catch (e) {
-    if (e.status === 409 || e.status === 422) {
-      const fresh = await getContent(path);
-      const data = await gh(`/repos/${s.repo}/contents/${encodeURIComponent(path)}`, {
-        method: 'PUT',
-        body: JSON.stringify({
-          message: `app: update ${path} (rebased)`,
-          content: textToB64(text),
-          sha: fresh.sha,
-          branch: 'main',
-        }),
-      });
-      return data.content.sha;
+  };
+  try {
+    if (isFn) {
+      const cur = await getContent(path);
+      const next = textOrFn(cur.text);
+      if (next === cur.text) return { sha: cur.sha, unchanged: true };  // 目标态已达成，不产生空提交
+      return { sha: await attempt(next, cur.sha, message || `app: update ${path}`), unchanged: false };
     }
-    throw e;
+    return { sha: await attempt(textOrFn, sha, message || `app: update ${path}`), unchanged: false };
+  } catch (e) {
+    if (e.status !== 409 && e.status !== 422) throw e;
+    const fresh = await getContent(path);
+    const next = isFn ? textOrFn(fresh.text) : textOrFn;
+    if (next === fresh.text) {
+      // 冲突后目标态已达成（前次请求实际已生效）——绝不重发相同内容制造空提交
+      return { sha: fresh.sha, unchanged: true };
+    }
+    const msg = (message || `app: update ${path}`) + ' (rebased)';
+    return { sha: await attempt(next, fresh.sha, msg), unchanged: false };
   }
 }
