@@ -193,9 +193,9 @@ async function renderToday() {
     if (sd.sched_today?.length) {
       html += `<h2 class="sec">日程（按计划走，不算任务）</h2><div class="cards sched">${sd.sched_today.map(it => itemCard(it, { menu: false, convert: true })).join('')}</div>`;
     }
-    html += `<div class="row"><button id="btn-diary" class="mini">记一笔今天</button></div>`;
+    html += `<button id="btn-diary" class="diary-entry"><b>日记</b><span>记一笔今天 · 做了什么与感受</span></button>`;
     if (sd.stale.length)
-      html += `<h2 class="sec">滑落（拖了很久）</h2><div class="cards">${sd.stale.map(itemCard).join('')}</div>`;
+      html += `<h2 class="sec">滑落（拖了很久）</h2><div class="cards">${sd.stale.map(it => itemCard(it, { menu: true })).join('')}</div>`;
     if (state.statsData) html += renderHeatmap(state.statsData);
     el.innerHTML = html;
     bindCb(el);
@@ -213,20 +213,16 @@ async function renderPlan() {
   const el = $('#plan-body');
   if (!$('#add-task-row')) {
     el.parentElement.insertAdjacentHTML('afterbegin', `
-      <div id="add-task-row" class="capture-box">
-        <div class="row" style="margin-top:0">
-          <input id="nt-text" type="text" placeholder="新任务…（直接写回，不经 LLM）" style="flex:1">
-          <input id="nt-date" type="text" placeholder="M/D（默认今天）" style="width:110px">
-          <label class="think"><input type="checkbox" id="nt-star"> 硬节点</label>
-        </div>
-        <div class="row">
-          <select id="nt-file" style="flex:1">
-            <option value="规划/26fall 9月执行清单.md">26fall 9月执行清单</option>
-            <option value="规划/26 fall.md">26 fall</option>
-          </select>
-          <button id="nt-add" class="primary" style="width:auto;margin-top:0;padding:8px 18px">添加任务</button>
-        </div>
+      <div id="add-task-row" class="nt-row">
+        <input id="nt-text" type="text" placeholder="新任务…">
+        <input id="nt-date" type="text" placeholder="M/D">
+        <button id="nt-star" class="nt-star" title="硬节点">☆</button>
+        <button id="nt-add" class="nt-add">添加</button>
       </div>`);
+    $('#nt-star').addEventListener('click', e => {
+      e.currentTarget.classList.toggle('on');
+      e.currentTarget.textContent = e.currentTarget.classList.contains('on') ? '★' : '☆';
+    });
     $('#nt-add').addEventListener('click', addTaskDirect);
   }
   el.innerHTML = skeleton();
@@ -395,7 +391,7 @@ async function addTaskDirect() {
   const today = new Date();
   const m = dv.match(/^(\d{1,2})[\/.](\d{1,2})$/);
   const dateStr = m ? `${+m[1]}/${+m[2]}` : `${today.getMonth() + 1}/${today.getDate()}`;
-  const star = $('#nt-star').checked ? '⭐' : '';
+  const star = $('#nt-star').classList.contains('on') ? '⭐' : '';
   const btn = $('#nt-add');
   btn.disabled = true; btn.textContent = '添加中…';
   try {

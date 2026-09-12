@@ -19,12 +19,13 @@ export async function openDiary({ put, toast, dateStr }) {
     if (text && text.trim()) initial = text;
   } catch { /* 首次写日记 */ }
 
+  const wd = ['日', '一', '二', '三', '四', '五', '六'][new Date(dateStr + 'T12:00:00').getDay()];
   const layer = document.createElement('div');
   layer.className = 'overlay diary on';
   layer.innerHTML =
     `<div class="filebar"><button class="diary-close">←</button>` +
-    `<strong>日记 · ${dateStr}</strong></div>` +
-    `<p class="dim small">做了什么写具体的事（会进周报摘要）；感受只属于你（任何报告都不读取）。</p>` +
+    `<strong>日记 · ${dateStr} 周${wd}</strong></div>` +
+    `<p class="dim small">「做了什么」写具体的事，会进周报摘要；「感受」只属于你，任何报告都不读取。</p>` +
     `<textarea class="diary-text"></textarea>` +
     `<button class="primary diary-save">保存日记</button>`;
   document.body.appendChild(layer);
