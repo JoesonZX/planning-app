@@ -3,7 +3,7 @@
 import { settings, addUsage, usage, estCost } from './store.js';
 import { render as mdRender } from './md.js';
 
-const CONTEXT_FILE_CAP = 6000;   // 每文件字符上限
+const CONTEXT_FILE_CAP = 15000;  // 每文件字符上限（最大真实文件 ~8.2k；提案协议禁止对截断文件提案，上限必须覆盖常用目标文件）
 const CONTEXT_TOTAL_CAP = 120000;
 // coding plan key 走 /api/coding/paas/v4；标准平台 key 走 /api/paas/v4（设置里可改）
 
@@ -45,7 +45,11 @@ export async function buildContext(fetchText) {
   for (const { p, t } of texts) {
     if (total >= CONTEXT_TOTAL_CAP) break;
     const slice = t.slice(0, CONTEXT_FILE_CAP);
-    parts.push(`=== ${p} ===\n${slice}`);
+    // 截断必须显式标记——提案协议靠它识别「不完整文件，禁止提案」
+    const trunc = t.length > CONTEXT_FILE_CAP
+      ? `\n…（⚠️ 已截断：上文只有此文件的前 ${CONTEXT_FILE_CAP} 字符，不完整——不要对此文件生成提案，可说明需用户提供全文）`
+      : '';
+    parts.push(`=== ${p} ===\n${slice}${trunc}`);
     total += slice.length;
   }
   return parts.join('\n\n');

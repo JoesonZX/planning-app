@@ -308,7 +308,8 @@ function renderInto(container, text, path) {
 }
 
 // ---------- 聊天提案（v5.1：LLM 提案 → diff 审查 → 手动应用，git 兜底） ----------
-const PROPOSAL_RE = /```planning-update\npath:[ \t]*(.+)\nnote:[ \t]*(.*)\n---\n([\s\S]*?)```/g;
+// note 行允许缺省（模型偶尔只给 path+正文；缺 note 时整块失配会静默降级成普通代码块）
+const PROPOSAL_RE = /```planning-update\npath:[ \t]*(.+)\n(?:note:[ \t]*(.*)\n)?---\n([\s\S]*?)```/g;
 const propStore = new Map();   // key -> {path, note, body}
 
 function propKey(path, body) {
@@ -332,7 +333,7 @@ function parseProposals(content) {
   while ((m = re.exec(content)) !== null) {
     const path = m[1].trim();
     if (!path.endsWith('.md')) continue;   // 只允许 .md（写守卫的一部分）
-    out.push({ path, note: m[2].trim(), body: m[3].replace(/\n+$/, '') });
+    out.push({ path, note: (m[2] || '').trim(), body: m[3].replace(/\n+$/, '') });
   }
   return out;
 }
@@ -424,23 +425,27 @@ async function applyProposal(key) {
     toast('✓ 已应用到 ' + p.path + '（git revert 可撤销）');
   } catch (e) { toast('应用失败：' + e.message, true); }
 }
-async function ensureChatContext() {
+function ensureChatContext() {
   const s = settings.load();
   $('#chat-model').value = s.model;
   $('#chat-thinking').checked = s.thinking === 'enabled';
   $('#chat-usage').textContent = usageSummary();
   drawChat();
   if (state.chatContext || !s.pat) return;
+  if (state.chatContextReady) return state.chatContextReady;  // 复用在途构建
   $('#chat-status').textContent = '正在并行加载 vault 上下文…';
-  try {
-    const t0 = Date.now();
-    state.chatContext = await buildContext({
-      paths: () => state.tree.length ? state.tree : getTree(),
-      raw: async p => (await fetchFile(p)).text,
-    });
+  const t0 = Date.now();
+  state.chatContextReady = buildContext({
+    paths: () => state.tree.length ? state.tree : getTree(),
+    raw: async p => (await fetchFile(p)).text,
+  }).then(ctx => {
+    state.chatContext = ctx;
     $('#chat-status').textContent =
-      `上下文就绪（${(state.chatContext.length / 1000).toFixed(0)}k 字符 / ${((Date.now() - t0) / 1000).toFixed(1)}s）`;
-  } catch (e) { $('#chat-status').textContent = '上下文加载失败：' + e.message; }
+      `上下文就绪（${(ctx.length / 1000).toFixed(0)}k 字符 / ${((Date.now() - t0) / 1000).toFixed(1)}s）`;
+  }).catch(e => {
+    $('#chat-status').textContent = '上下文加载失败：' + e.message;
+  }).finally(() => { state.chatContextReady = null; });
+  return state.chatContextReady;
 }
 function pushMessage(role, content, reasoning) {
   const h = JSON.parse(localStorage.getItem('pp_chat') || '[]');
@@ -504,9 +509,15 @@ async function chatSend(preset) {
   const errEl = $('#chat-status');
   errEl.textContent = '思考中…';
   try {
+    if (state.chatContextReady) await state.chatContextReady;  // 上下文构建中则等它（否则首条消息会裸发）
+    // 历史里的提案块（含完整文件内容）换成一行摘要再回传——否则每次提问
+    // 都复读整个文件，上下文与 token 成倍膨胀
+    const stripProps = c => c.replace(/```planning-update\n[\s\S]*?```/g,
+      '（此处曾生成规划提案，内容已省略）');
     const history = JSON.parse(localStorage.getItem('pp_chat') || '[]')
       .slice(0, -1).filter(m => (m.role === 'user' || m.role === 'assistant')
-        && m.content && m.content.trim());
+        && m.content && m.content.trim())
+      .map(m => ({ role: m.role, content: stripProps(m.content) }));
     const reply = await sendChat(text, state.chatContext || '', history);
     if (reply.retried) toast('思考耗尽了输出预算，已自动关思考重试成功');
     pushMessage('assistant', reply.content, reply.reasoning);
