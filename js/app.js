@@ -16,10 +16,9 @@ const $$ = s => [...document.querySelectorAll(s)];
 function show(tab) {
   $$('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + tab));
-  if (tab === 'chat') ensureChatContext();
+  if (tab === 'assistant') { ensureChatContext(); renderInboxStrip(); }
   if (tab === 'today' && !$('#today-body').dataset.loaded) renderToday();
-  if (tab === 'plan' && !$('#plan-body').dataset.loaded) renderPlan();
-  if (tab === 'inbox' && !$('#inbox-body').dataset.loaded) renderInboxView();
+  if (tab === 'plan' && !$('#plan-body').dataset.loaded) { renderPlan(); renderDocs(); }
 }
 function toast(msg, err = false) {
   const t = $('#toast');
@@ -110,7 +109,7 @@ function renderHeatmap(stats) {
     html += `<i class="hcell l${level}${isFuture ? ' future' : ''}" title="${cell.d}：${cell.c} 提交 / ${cell.x} 勾选"></i>`;
   });
   html += '</div>';
-  return `<h2 class="sec">🔥 坚持</h2><p class="dim small">近 12 周 · 越亮越活跃（仅你的提交计入）</p>${html}`;
+  return `<h2 class="sec">坚持</h2><p class="dim small">近 12 周 · 越亮越活跃（仅你的提交计入）</p>${html}`;
 }
 async function renderToday() {
   const el = $('#today-body');
@@ -125,7 +124,7 @@ async function renderToday() {
       try { state.statsData = await fetchJSON('reports/stats.json'); } catch { /* 无热力图数据不致命 */ }
     }
     const today = sd.today;
-    let html = `<h2 class="sec">☀️ 今天 · ${fmtDay(today)}</h2>`;
+    let html = `<h2 class="sec">今天 · ${fmtDay(today)}</h2>`;
     // 时间线
     if (sd.timeline?.length) {
       html += '<div class="timeline">';
@@ -135,14 +134,14 @@ async function renderToday() {
     }
     html += sd.today_items.length
       ? `<div class="cards">${sd.today_items.map(itemCard).join('')}</div>`
-      : emptyState('🌤️', '今天没有标注事项——把明天要做的提前想好');
+      : emptyState('', '今天没有标注事项——把明天要做的提前想好');
     if (sd.stale.length)
-      html += `<h2 class="sec">🐌 滑落（拖了很久）</h2><div class="cards">${sd.stale.map(itemCard).join('')}</div>`;
+      html += `<h2 class="sec">滑落（拖了很久）</h2><div class="cards">${sd.stale.map(itemCard).join('')}</div>`;
     if (state.statsData) html += renderHeatmap(state.statsData);
     el.innerHTML = html;
     bindCb(el);
   } catch (e) {
-    el.innerHTML = emptyState('🌙', 'state.json 还没生成——今晚 21:00 的晚间报告会带上它',
+    el.innerHTML = emptyState('', 'state.json 还没生成——今晚 21:00 的晚间报告会带上它',
       e.message.includes('404') ? '' : `<p class="dim small">${e.message}</p>`);
   }
 }
@@ -155,7 +154,7 @@ async function renderPlan() {
   try {
     const sd = state.stateData || (state.stateData = await fetchJSON('reports/state.json'));
     const today = sd.today;
-    if (!sd.week.length) { el.innerHTML = emptyState('📅', '未来 7 天没有安排'); return; }
+    if (!sd.week.length) { el.innerHTML = emptyState('', '未来 7 天没有安排'); return; }
     el.innerHTML = sd.week.map(g => {
       const d = new Date(g.date + 'T12:00:00');
       const rel = g.date === today ? '明天→' : '';
@@ -164,35 +163,97 @@ async function renderPlan() {
     }).join('');
     bindCb(el);
   } catch (e) {
-    el.innerHTML = emptyState('🌙', '计划数据来自每晚的 state.json（今晚起生成）', e.message);
+    el.innerHTML = emptyState('', '计划数据来自每晚的 state.json（今晚起生成）', e.message);
   }
 }
 
-// ---------- 收件箱 ----------
-async function renderInboxView() {
-  const el = $('#inbox-body');
+// ---------- 收件箱（并入助手 tab：乐观纸条 + 展开/删除） ----------
+function inboxLines(text) {
+  return text.split('\n').map(x => x.trim())
+    .map((x, i) => ({ x, i }))
+    .filter(o => o.x && !o.x.startsWith('#'));
+}
+async function renderInboxStrip() {
+  const wrap = $('#inbox-strip-wrap');
   try {
     const f = await fetchFile('inbox.md');
-    const lines = f.text.split('\n').map(x => x.trim())
-      .filter(x => x && !x.startsWith('#'));
-    el.innerHTML = lines.length
-      ? `<div class="cards">${lines.map(l => {
-          const m = l.match(/^([-*])\s+\[([ xX])\]\s*(.*)$/) || l.match(/^⏳\s*待人工[：:]\s*(.*)$/);
-          const held = l.startsWith('⏳');
-          const body = held ? m ? m[1] : l.slice(6)
-            : m ? m[3] : l;
-          return `<div class="card ${held ? 'warn' : ''}">${held ? '⏳ ' : ''}${escapeHtml(body)}<em>（${held ? '待人工处理' : 'inbox'}）</em></div>`;
-        }).join('')}</div>
-        <p class="dim small">每周日 20:00 自动分拣进对应文件；⏳ 项需要你亲手处理。</p>`
-      : emptyState('📥', '收件箱是空的——上面的框随手记');
-    el.dataset.loaded = '1';
-  } catch (e) { el.innerHTML = emptyState('📥', 'inbox.md 读取失败：' + e.message); }
+    const lines = inboxLines(f.text);
+    wrap.classList.toggle('hidden', false);
+    const strip = $('#inbox-strip');
+    strip.innerHTML = lines.length
+      ? lines.map((o, k) => `<button class="strip-chip${o.x.startsWith('⏳') ? ' held' : ''}" data-k="${k}">${escapeHtml(o.x.replace(/^[-*]\s+\[[ xX]\]\s*/, '').slice(0, 18))}</button>`).join('')
+      : '<span class="dim small">待分拣是空的——下面的框随手记，周日自动分拣</span>';
+    strip.querySelectorAll('.strip-chip').forEach(b =>
+      b.addEventListener('click', () => showStripDetail(+b.dataset.k)));
+    $('#strip-detail').classList.add('hidden');
+  } catch { wrap.classList.add('hidden'); }
+}
+function showStripDetail(k) {
+  const f = state.fileCache['inbox.md'];
+  if (!f) return;
+  const lines = inboxLines(f.text);
+  const o = lines[k];
+  if (!o) return;
+  const d = $('#strip-detail');
+  d.classList.remove('hidden');
+  d.innerHTML = `<div class="strip-full">${escapeHtml(o.x.replace(/^[-*]\s+\[[ xX]\]\s*/, ''))}</div>` +
+    `<button class="mini prop-apply strip-del" data-line="${o.i}">删除这条</button>` +
+    `<button class="mini strip-close">收起</button>`;
+  d.querySelector('.strip-del').addEventListener('click', async () => {
+    try {
+      const cur = await fetchFile('inbox.md');
+      const kept = cur.text.split('\n').filter((_, i) => i !== o.i);
+      await busy(writeFile('inbox.md', kept.join('\n'), 'app: 删除 inbox 条目'));
+      vibrate();
+      toast('已删除');
+      renderInboxStrip();
+    } catch (e) { toast('删除失败：' + e.message, true); }
+  });
+  d.querySelector('.strip-close').addEventListener('click', () =>
+    d.classList.add('hidden'));
+}
+// 记下：乐观上屏 + 三态按钮 + 离线兜底
+let noteBusy = false;
+async function recordDown() {
+  if (noteBusy) return;
+  const input = $('#chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  const btn = $('#btn-note');
+  noteBusy = true;
+  btn.disabled = true; $('#chat-send').disabled = true;
+  btn.textContent = '记下…';
+  const line = `- [ ] ${text}`;
+  // 乐观上屏：立即出现在纸条行（同步中样式）
+  const strip = $('#inbox-strip');
+  strip.querySelectorAll('.strip-chip.syncing').forEach(x => x.remove());
+  const sync = document.createElement('button');
+  sync.className = 'strip-chip syncing';
+  sync.textContent = text.slice(0, 18);
+  strip.prepend(sync);
+  input.value = ''; updateInputState();
+  try {
+    const inbox = await fetchFile('inbox.md');
+    await writeFile('inbox.md', inbox.text.replace(/\s*$/, '') + '\n' + line + '\n', 'app: 随手记');
+    vibrate();
+    btn.textContent = '✓ 已记入';
+    setTimeout(() => { btn.textContent = '记下'; updateInputState(); noteBusy = false; }, 900);
+    renderInboxStrip();
+    localStorage.setItem('pp_enterAction', 'note');
+  } catch (e) {
+    sync.remove();
+    input.value = text; updateInputState();
+    noteBusy = false; btn.textContent = '记下'; updateInputState();
+    if (navigator.onLine === false || /Failed to fetch|NetworkError|timeout/i.test(e.message)) enqueueOffline(line);
+    else toast('写入失败：' + e.message, true);
+    return;
+  }
 }
 function enqueueOffline(line) {
   const q = JSON.parse(localStorage.getItem('pp_outbox') || '[]');
   q.push(line);
   localStorage.setItem('pp_outbox', JSON.stringify(q));
-  toast('📴 当前离线，已存本地，联网后自动同步');
+  toast('当前离线，已存本地，联网后自动同步');
 }
 async function flushOutbox() {
   const q = JSON.parse(localStorage.getItem('pp_outbox') || '[]');
@@ -204,25 +265,7 @@ async function flushOutbox() {
     toast(`✓ 已补记 ${q.length} 条离线内容`);
   } catch { /* 下次再试 */ }
 }
-async function inboxSubmit() {
-  const input = $('#inbox-input');
-  const text = input.value.trim();
-  if (!text) return;
-  const line = $('#inbox-task').checked ? `- [ ] ${text}` : text;
-  try {
-    const inbox = await fetchFile('inbox.md');
-    await writeFile('inbox.md', inbox.text.replace(/\s*$/, '') + '\n' + line + '\n', 'app: 随手记');
-    input.value = '';
-    vibrate();
-    toast('✓ 已记入（周日自动分拣）');
-    if ($('#view-inbox').classList.contains('active')) renderInboxView();
-  } catch (e) {
-    if (navigator.onLine === false || /Failed to fetch|NetworkError/i.test(e.message)) enqueueOffline(line);
-    else toast('写入失败：' + e.message, true);
-  }
-}
-
-// ---------- 文档（报告 + 文件） ----------
+// ---------- 文档（报告 + 文件，住进「计划」子页） ----------
 async function renderDocs() {
   const reports = state.tree.filter(t =>
     /^reports\/(tomorrow|week-.*|triage.*)\.md$/.test(t.path)).map(t => t.path);
@@ -470,19 +513,16 @@ function drawChat() {
       body = main;
     } else body = escapeHtml(m.content);
     return `<div class="msg ${m.role}"><div class="bubble">${body}</div>` +
-      (m.role === 'assistant' && m.content && !parseProposals(m.content).length ? `<button class="mini to-inbox">↩ 写进 inbox</button>` : '') + `</div>`;
+      (m.role === 'assistant' && m.content && !parseProposals(m.content).length ? `<button class="mini to-plan">落进规划</button>` : '') + `</div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
   el.querySelectorAll('.retry-empty').forEach(b =>
     b.addEventListener('click', retryLastChat));
   bindProposals(el);
-  el.querySelectorAll('.to-inbox').forEach(b => b.addEventListener('click', async () => {
-    const text = b.closest('.msg').querySelector('.bubble').innerText.slice(0, 800);
-    try {
-      const inbox = await fetchFile('inbox.md');
-      await writeFile('inbox.md', inbox.text.replace(/\s*$/, '') + '\n来自聊天：' + text.replace(/\n+/g, ' ') + '\n', 'app: 聊天 → inbox');
-      b.textContent = '✓ 已入 inbox'; b.disabled = true;
-    } catch (e) { toast('写入失败：' + e.message, true); }
+  // 落进规划：把该轮对话整理成提案（常驻入口；已有提案的消息不再给）
+  el.querySelectorAll('.to-plan').forEach(b => b.addEventListener('click', () => {
+    localStorage.setItem('pp_enterAction', 'ask');
+    chatSend('把我们最近的对话整理成 planning-update 提案块（每个文件一个，note 说明理由；情绪与感情文件不要动）。若没有值得落盘的内容，直接说明。');
   }));
 }
 async function retryLastChat() {
@@ -500,16 +540,22 @@ async function retryLastChat() {
   drawChat();
   chatSend(text);
 }
+let sendBusy = false;
 async function chatSend(preset) {
+  if (sendBusy) return;
   const input = $('#chat-input');
   const text = (preset || input.value).trim();
   if (!text) return;
-  input.value = '';
+  if (state.chatContextReady) await state.chatContextReady;  // 上下文构建中则等它（否则首条消息会裸发）
+  input.value = ''; updateInputState();
+  sendBusy = true; updateInputState();
+  const sendBtn = $('#chat-send');
+  const oldLabel = sendBtn.textContent;
+  sendBtn.textContent = '…';
   pushMessage('user', text); drawChat();
   const errEl = $('#chat-status');
   errEl.textContent = '思考中…';
   try {
-    if (state.chatContextReady) await state.chatContextReady;  // 上下文构建中则等它（否则首条消息会裸发）
     // 历史里的提案块（含完整文件内容）换成一行摘要再回传——否则每次提问
     // 都复读整个文件，上下文与 token 成倍膨胀
     const stripProps = c => c.replace(/```planning-update\n[\s\S]*?```/g,
@@ -525,6 +571,11 @@ async function chatSend(preset) {
     $('#chat-usage').textContent = usageSummary();
     errEl.textContent = '';
   } catch (e) { errEl.textContent = e.message; }
+  finally {
+    sendBusy = false;
+    sendBtn.textContent = oldLabel;
+    updateInputState();
+  }
 }
 function bindChat() {
   $('#chat-send').addEventListener('click', () => chatSend());
@@ -535,10 +586,8 @@ function bindChat() {
   $('#chat-thinking').addEventListener('change', e => settings.save({ thinking: e.target.checked ? 'enabled' : 'disabled' }));
   $('#chat-clear').addEventListener('click', () => { localStorage.removeItem('pp_chat'); drawChat(); toast('聊天记录已清空'); });
   const presets = [
-    ['📊 周日复盘', '请带我做完本周复盘：1) 从 vault 列出本周完成与滑落；2) 一次一个地问我三个关于下周的问题，等我回答；3) 最后汇总「下周三件事」，每件带何时/何地。'],
-    ['📅 落进规划', '回顾我们最近的对话（若本次对话为空则基于 vault 现状），把应当落进规划文件的更新整理成 planning-update 提案块（每个文件一个完整提案，note 说明理由）。情绪与感情文件不要动。'],
-    ['☀️ 今天做什么', '基于今天的日期和 vault，告诉我今天最该做的三件事和顺序，一句话理由。'],
-    ['🗺️ 怎么用这个系统', '用 5 句话向新用户解释这个 app 各 tab 的用途和自动化流程。'],
+    ['周日复盘', '请带我做完本周复盘：1) 从 vault 列出本周完成与滑落；2) 一次一个地问我三个关于下周的问题，等我回答；3) 最后汇总「下周三件事」，每件带何时/何地。'],
+    ['今天做什么', '基于今天的日期和 vault，告诉我今天最该做的三件事和顺序，一句话理由。'],
   ];
   $('#chat-presets').innerHTML = presets.map((p, i) =>
     `<button class="mini preset" data-i="${i}">${p[0]}</button>`).join('');
@@ -574,7 +623,7 @@ async function togglePush(btn) {
       await sub.unsubscribe();
       const subs = (await getPushSubs()).filter(s => s.endpoint !== sub.endpoint);
       await savePushSubs(subs);
-      btn.textContent = '🔔 开启推送';
+      btn.textContent = '开启推送';
       toast('推送已关闭');
     } else {    // 开启
       const perm = await Notification.requestPermission();
@@ -586,8 +635,8 @@ async function togglePush(btn) {
       const subs = await getPushSubs();
       subs.push(sub.toJSON());
       await savePushSubs(subs);
-      btn.textContent = '🔕 关闭推送';
-      toast('✓ 推送已开启（今晚 21:00 见）');
+      btn.textContent = '关闭推送';
+      toast('推送已开启，今晚 21:00 见');
     }
   } catch (e) { toast('推送设置失败：' + e.message, true); }
   btn.disabled = false;
@@ -649,11 +698,11 @@ async function refreshAll(full = false) {
   state.fileCache = {}; // bot 可能已更新文件，强制重拉
   $('#today-body').dataset.loaded = '';
   $('#plan-body').dataset.loaded = '';
-  $('#inbox-body').dataset.loaded = '';
   state.chatContext = null;
   await renderDocs();
   await renderToday();
   $('#today-body').dataset.loaded = '1';
+  renderInboxStrip();
 }
 let gChord = false;
 function bindKeys() {
@@ -663,12 +712,12 @@ function bindKeys() {
     if (typing || e.metaKey || e.ctrlKey) return;
     if (gChord) {
       gChord = false;
-      const map = { t: 'today', p: 'plan', i: 'inbox', d: 'docs', c: 'chat', s: 'settings' };
+      const map = { t: 'today', p: 'plan', a: 'assistant' };
       if (map[e.key]) { show(map[e.key]); return; }
     }
     if (e.key === 'g') { gChord = true; setTimeout(() => gChord = false, 900); }
     if (e.key === 'r') refreshAll().then(() => toast('已刷新'));
-    if (e.key === '/') { e.preventDefault(); show('inbox'); $('#inbox-input').focus(); }
+    if (e.key === '/') { e.preventDefault(); show('assistant'); $('#chat-input').focus(); }
   });
 }
 function bindPTR() {
@@ -692,14 +741,31 @@ function bindNav() {
   $$('.tab-btn').forEach(b => b.addEventListener('click', () => show(b.dataset.tab)));
   $$('.subtab').forEach(b => b.addEventListener('click', () => {
     $$('.subtab').forEach(x => x.classList.toggle('active', x === b));
+    $('#plan-tasks').classList.toggle('hidden', b.dataset.doc !== 'tasks');
     $('#doc-reports').classList.toggle('hidden', b.dataset.doc !== 'reports');
     $('#doc-files').classList.toggle('hidden', b.dataset.doc !== 'files');
   }));
   $('#btn-refresh').addEventListener('click', () => refreshAll().then(() => toast('已刷新')));
-  $('#inbox-send').addEventListener('click', inboxSubmit);
-  $('#inbox-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); inboxSubmit(); }
+  $('#btn-settings').addEventListener('click', () => $('#settings-view').classList.add('on'));
+  $('#btn-close-settings').addEventListener('click', () => $('#settings-view').classList.remove('on'));
+  // 助手输入：一框双钮 + Enter 记忆（默认问）+ 空输入禁用
+  const input = $('#chat-input');
+  const updateInputState = () => {
+    const has = !!input.value.trim();
+    $('#btn-note').disabled = !has || noteBusy;
+    $('#chat-send').disabled = !has || sendBusy;
+  };
+  window.updateInputState = updateInputState;
+  input.addEventListener('input', updateInputState);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const action = localStorage.getItem('pp_enterAction') || 'ask';
+      (action === 'note' ? recordDown : chatSend)();
+    }
   });
+  $('#btn-note').addEventListener('click', () => { localStorage.setItem('pp_enterAction', 'note'); recordDown(); });
+  $('#chat-send').addEventListener('click', () => { localStorage.setItem('pp_enterAction', 'ask'); chatSend(); });
   $('#btn-close-file').addEventListener('click', () => $('#file-viewer').classList.remove('on'));
   $('#btn-edit').addEventListener('click', () => setFileMode('edit'));
   $('#btn-preview').addEventListener('click', () => setFileMode('preview'));

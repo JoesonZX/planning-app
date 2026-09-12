@@ -16,10 +16,11 @@ def call(key, prompt, max_tokens=12000):
         "model": "glm-5.3-flash",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2, "max_tokens": max_tokens,
+        "thinking": {"type": "disabled"},
     }).encode("utf-8")
     req = urllib.request.Request(URL, data=body, method="POST",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=180) as r:
+    with urllib.request.urlopen(req, timeout=300) as r:
         return json.loads(r.read().decode("utf-8"))["choices"][0]["message"]["content"].strip()
 
 def strip_fences(t):

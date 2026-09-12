@@ -7,8 +7,16 @@ export function escapeHtml(s) {
 }
 
 // 行内格式（先转义后加标记）：供状态条目卡片复用
+// v6：语义标记徽标化（⭐→硬节点、⏳→待人工、📋简报→简报），其余 emoji 剥除（↑↓ 保留）
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{2300}-\u{23FF}]/gu;
+
 export function inline(text) {
   let t = escapeHtml(text);
+  t = t.replace(/⭐+/g, '<span class="badge b-star">硬节点</span>');
+  t = t.replace(/⏳\s*待人工[：:]?\s*/g, '<span class="badge b-hold">待人工</span>');
+  t = t.replace(/⏳/g, '<span class="badge b-hold">待人工</span>');
+  t = t.replace(/📋\s*简报[：:]\s*/g, '<span class="badge b-brief">简报</span> ');
+  t = t.replace(EMOJI_RE, '');
   t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   t = t.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self' https://api.github.com https://open.bigmodel.cn; img-src 'self' data:; style-src 'self'; script-src 'self'">
-<meta name="theme-color" content="#0d1526">
+<meta name="theme-color" content="#ffffff">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <title>规划</title>
@@ -13,7 +13,8 @@
 </head>
 <body>
 <header>
-  <h1>🧭 规划</h1>
+  <button id="btn-settings" class="iconbtn" title="设置" aria-label="设置">☰</button>
+  <h1>规划</h1>
   <span id="conn" class="dim">未连接</span>
   <button id="btn-refresh" class="iconbtn" title="刷新 (r)">⟳</button>
 </header>
@@ -22,47 +23,34 @@
   <!-- 今天 -->
   <section id="view-today" class="view">
     <div id="onboarding" class="hidden">
-      <h2>👋 三步开始</h2>
+      <h2>三步开始</h2>
       <ol class="steps">
         <li>打开 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub PAT 页面</a>，只勾 <b>planning-data</b> 仓 + Contents 读写，生成后复制</li>
-        <li>粘贴到下方 PAT 框，点「保存并连接」</li>
-        <li>想解锁聊天和推送，在设置里补 GLM key</li>
+        <li>粘贴到下方 PAT 框，点「连接」</li>
+        <li>想解锁聊天和推送，在设置（左上角 ☰）里补 GLM key</li>
       </ol>
       <div class="row"><input id="ob-pat" type="password" placeholder="github_pat_…"><button id="ob-save" class="primary">连接</button></div>
     </div>
     <div id="today-body"></div>
   </section>
 
-  <!-- 计划 -->
-  <section id="view-plan" class="view"><div id="plan-body"></div></section>
-
-  <!-- 收件箱 -->
-  <section id="view-inbox" class="view">
-    <div class="capture-box">
-      <textarea id="inbox-input" rows="2" placeholder="想到什么写什么…（Enter 发送，Shift+Enter 换行）"></textarea>
-      <div class="row">
-        <label class="think"><input type="checkbox" id="inbox-task" checked> 任务格式</label>
-        <button id="inbox-send" class="primary">记下</button>
-      </div>
-    </div>
-    <div id="inbox-body"></div>
-  </section>
-
-  <!-- 文档（报告 + 文件） -->
-  <section id="view-docs" class="view">
+  <!-- 计划（任务 / 报告 / 文件） -->
+  <section id="view-plan" class="view">
     <div class="subtabs">
-      <button class="subtab active" data-doc="reports">报告</button>
+      <button class="subtab active" data-doc="tasks">任务</button>
+      <button class="subtab" data-doc="reports">报告</button>
       <button class="subtab" data-doc="files">文件</button>
     </div>
-    <div id="doc-reports">
+    <div id="plan-tasks"><div id="plan-body"></div></div>
+    <div id="doc-reports" class="hidden">
       <div id="report-chips"></div>
       <div id="report-body" class="md"></div>
     </div>
     <div id="doc-files" class="hidden"><div id="file-list"></div></div>
   </section>
 
-  <!-- 聊天 -->
-  <section id="view-chat" class="view chat">
+  <!-- 助手（聊天 + 收件箱） -->
+  <section id="view-assistant" class="view chat">
     <div class="chat-bar">
       <select id="chat-model">
         <option value="glm-5.3">GLM-5.3</option>
@@ -75,44 +63,53 @@
     <div id="chat-usage" class="dim small"></div>
     <div id="chat-status" class="dim small"></div>
     <div id="chat-messages"></div>
+    <div id="inbox-strip-wrap" class="hidden">
+      <div id="inbox-strip"></div>
+      <div id="strip-detail" class="hidden"></div>
+    </div>
     <div class="chat-input-row">
-      <textarea id="chat-input" rows="1" placeholder="问点什么…（Enter 发送）"></textarea>
-      <button id="chat-send">↑</button>
+      <textarea id="chat-input" rows="1" placeholder="问点什么，或记一笔…"></textarea>
+      <button id="btn-note" disabled>记下</button>
+      <button id="chat-send" disabled title="提问">↑</button>
     </div>
   </section>
-
-  <!-- 设置 -->
-  <section id="view-settings" class="view">
-    <h2>GitHub</h2>
-    <label>PAT（fine-grained，仅 planning-data 仓，Contents 读写）</label>
-    <input id="set-pat" type="password" placeholder="github_pat_…">
-    <label>仓库</label>
-    <input id="set-repo" type="text">
-    <h2>推送</h2>
-    <div class="row"><button id="btn-push" class="primary">🔔 开启推送</button></div>
-    <p class="dim small">iOS 需先把本页「添加到主屏幕」再点。收到：每晚报告、周报、任务失败警报。关闭 = 再次点击。</p>
-    <h2>GLM 聊天</h2>
-    <label>GLM API Key（coding plan 的 key 直接可用）</label>
-    <input id="set-glm" type="password" placeholder="粘贴 key">
-    <label>API 路径（coding plan 保持默认）</label>
-    <input id="set-glmbase" type="text">
-    <label>聊天预算（USD/月）</label>
-    <input id="set-budget" type="number" step="0.5">
-    <label>5.3 单价（USD/百万 tokens；输入 × 输出）</label>
-    <div class="row"><input id="set-pricein" type="number" step="0.001"><input id="set-priceout" type="number" step="0.001"></div>
-    <div id="set-usage" class="dim small"></div>
-    <button id="btn-save-settings" class="primary">保存并连接</button>
-    <details class="guide"><summary>📱 iPhone 配置与随手记快捷指令（10 分钟）</summary>
-      <ol class="steps small">
-        <li>Safari 打开本页 → 分享 → 「添加到主屏幕」（PWA 推送的前提）</li>
-        <li>快捷指令 App → 新建：①「获取文本」输入内容 ②「获取 URL 内容」：PUT <code>https://api.github.com/repos/你的仓/contents/inbox.md</code>（先 GET 取 sha 再 PUT，Authorization: Bearer 你的PAT）③每次运行自动追加到 inbox</li>
-        <li>可设为「共享表单」动作：任何 App 里分享文字 → 直达 inbox</li>
-      </ol>
-    </details>
-    <h2>危险区</h2>
-    <button id="btn-clear-local">清空本浏览器数据</button>
-  </section>
 </main>
+
+<!-- 设置（全屏 overlay，左上角 ☰ 进入） -->
+<div id="settings-view" class="overlay">
+  <div class="filebar">
+    <button id="btn-close-settings">←</button>
+    <strong>设置</strong>
+  </div>
+  <h2>GitHub</h2>
+  <label>PAT（fine-grained，仅 planning-data 仓，Contents 读写）</label>
+  <input id="set-pat" type="password" placeholder="github_pat_…">
+  <label>仓库</label>
+  <input id="set-repo" type="text">
+  <h2>推送</h2>
+  <div class="row"><button id="btn-push" class="primary">开启推送</button></div>
+  <p class="dim small">iOS 需先把本页「添加到主屏幕」再点。收到：每晚报告、周报、任务失败警报。关闭 = 再次点击。</p>
+  <h2>GLM 聊天</h2>
+  <label>GLM API Key（coding plan 的 key 直接可用）</label>
+  <input id="set-glm" type="password" placeholder="粘贴 key">
+  <label>API 路径（coding plan 保持默认）</label>
+  <input id="set-glmbase" type="text">
+  <label>聊天预算（USD/月）</label>
+  <input id="set-budget" type="number" step="0.5">
+  <label>5.3 单价（USD/百万 tokens；输入 × 输出）</label>
+  <div class="row"><input id="set-pricein" type="number" step="0.001"><input id="set-priceout" type="number" step="0.001"></div>
+  <div id="set-usage" class="dim small"></div>
+  <button id="btn-save-settings" class="primary">保存并连接</button>
+  <details class="guide"><summary>iPhone 配置与随手记快捷指令（10 分钟）</summary>
+    <ol class="steps small">
+      <li>Safari 打开本页 → 分享 → 「添加到主屏幕」（PWA 推送的前提）</li>
+      <li>快捷指令 App → 新建：①「获取文本」输入内容 ②「获取 URL 内容」：PUT <code>https://api.github.com/repos/你的仓/contents/inbox.md</code>（先 GET 取 sha 再 PUT，Authorization: Bearer 你的PAT）③每次运行自动追加到 inbox</li>
+      <li>可设为「共享表单」动作：任何 App 里分享文字 → 直达 inbox</li>
+    </ol>
+  </details>
+  <h2>危险区</h2>
+  <button id="btn-clear-local">清空本浏览器数据</button>
+</div>
 
 <div id="file-viewer" class="overlay">
   <div class="filebar">
@@ -131,12 +128,9 @@
 <div id="loading"></div>
 
 <nav>
-  <button class="tab-btn active" data-tab="today">☀️ 今天</button>
-  <button class="tab-btn" data-tab="plan">📅 计划</button>
-  <button class="tab-btn" data-tab="inbox">📥 收件箱</button>
-  <button class="tab-btn" data-tab="docs">📄 文档</button>
-  <button class="tab-btn" data-tab="chat">💬 聊天</button>
-  <button class="tab-btn" data-tab="settings">⚙️ 设置</button>
+  <button class="tab-btn active" data-tab="today">今天</button>
+  <button class="tab-btn" data-tab="plan">计划</button>
+  <button class="tab-btn" data-tab="assistant">助手</button>
 </nav>
 
 <script type="module" src="js/app.js"></script>

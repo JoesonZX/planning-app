@@ -7,6 +7,8 @@ async function gh(path, opts = {}) {
   const s = settings.load();
   const res = await fetch(API + path, {
     ...opts,
+    // 15s 超时：弱网/认证门户下请求悬挂是「记下无反馈」的主因——超时按网络错误走离线兜底
+    signal: AbortSignal.timeout(15000),
     headers: {
       Authorization: `Bearer ${s.pat}`,
       Accept: 'application/vnd.github+json',
