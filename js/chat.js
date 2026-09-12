@@ -61,16 +61,24 @@ export function budgetBlocked() {
   return s.priceOutPerM > 0 && cost >= s.chatBudgetUsd;
 }
 
-export async function sendChat(userText, context, history) {
+export async function sendChat(userText, context, history, signal) {
   const s = settings.load();
   if (!s.glmKey) throw new Error('未配置 GLM key（设置里填）');
   if (budgetBlocked() && s.model === 'glm-5.3') {
     throw new Error('本月聊天预算已用完（可在设置里调高或改单价），已阻止 5.3 调用。可切换 glm-5.3-flash（免费）。');
   }
 
+  // 日期锚点：vault 与报告生成于昨晚，其中的「今天/明天」都滞后——不注入这行
+  // 模型会把报告里的旧日期当今天（实测把周六答成周五）
+  const now = new Date();
+  const wd = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
+  const dateLine =
+    `今天是 ${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日，周${wd}。` +
+    'vault 文件与报告生成于昨晚，其中的「今天/明天/周五」等日期可能滞后，一律以本行为准。';
+
   // 空正文的历史消息（旧版截断残留）不进上下文——空 content 可能被 API 拒收
   const messages = [
-    { role: 'system', content: SYSTEM_PROMPT + '\n\n' + context },
+    { role: 'system', content: SYSTEM_PROMPT + '\n\n' + dateLine + '\n\n' + context },
     ...history.filter(h => h.content && h.content.trim()).slice(-16)
       .map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content: userText },
@@ -94,6 +102,7 @@ export async function sendChat(userText, context, history) {
       method: 'POST',
       headers: { Authorization: `Bearer ${s.glmKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,   // 清空聊天时中止在途请求
     });
     if (!res.ok) {
       let msg = `GLM ${res.status}`;

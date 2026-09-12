@@ -555,6 +555,8 @@ async function chatSend(preset) {
   pushMessage('user', text); drawChat();
   const errEl = $('#chat-status');
   errEl.textContent = '思考中…';
+  const ac = new AbortController();
+  state.chatAbort = ac;
   try {
     // 历史里的提案块（含完整文件内容）换成一行摘要再回传——否则每次提问
     // 都复读整个文件，上下文与 token 成倍膨胀
@@ -564,13 +566,15 @@ async function chatSend(preset) {
       .slice(0, -1).filter(m => (m.role === 'user' || m.role === 'assistant')
         && m.content && m.content.trim())
       .map(m => ({ role: m.role, content: stripProps(m.content) }));
-    const reply = await sendChat(text, state.chatContext || '', history);
+    const reply = await sendChat(text, state.chatContext || '', history, ac.signal);
     if (reply.retried) toast('思考耗尽了输出预算，已自动关思考重试成功');
     pushMessage('assistant', reply.content, reply.reasoning);
     drawChat();
     $('#chat-usage').textContent = usageSummary();
     errEl.textContent = '';
-  } catch (e) { errEl.textContent = e.message; }
+  } catch (e) {
+    errEl.textContent = e.name === 'AbortError' ? '已停止' : e.message;
+  }
   finally {
     sendBusy = false;
     sendBtn.textContent = oldLabel;
@@ -584,7 +588,12 @@ function bindChat() {
   });
   $('#chat-model').addEventListener('change', e => settings.save({ model: e.target.value }));
   $('#chat-thinking').addEventListener('change', e => settings.save({ thinking: e.target.checked ? 'enabled' : 'disabled' }));
-  $('#chat-clear').addEventListener('click', () => { localStorage.removeItem('pp_chat'); drawChat(); toast('聊天记录已清空'); });
+  $('#chat-clear').addEventListener('click', () => {
+    if (state.chatAbort) { try { state.chatAbort.abort(); } catch { /* 已结束 */ } }
+    localStorage.removeItem('pp_chat');
+    drawChat();
+    toast('聊天记录已清空');
+  });
   const presets = [
     ['周日复盘', '请带我做完本周复盘：1) 从 vault 列出本周完成与滑落；2) 一次一个地问我三个关于下周的问题，等我回答；3) 最后汇总「下周三件事」，每件带何时/何地。'],
     ['今天做什么', '基于今天的日期和 vault，告诉我今天最该做的三件事和顺序，一句话理由。'],
