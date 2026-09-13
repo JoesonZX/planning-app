@@ -1,14 +1,22 @@
 {
-  "name": "规划",
-  "short_name": "规划",
-  "description": "个人规划系统前端：仪表盘 / 晚间报告 / 死线 / 聊天",
+  "name": "规划秘书",
+  "short_name": "秘书",
+  "description": "个人规划秘书：今日简报 / 秘书聊天 / 日记",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
   ]
 }

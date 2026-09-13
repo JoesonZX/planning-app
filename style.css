@@ -479,3 +479,8 @@ details.pastfold .dayhead { color: var(--faint); margin-top: 16px; }
 .diary-actions { display: flex; gap: 8px; margin-top: 10px; }
 .diary-actions button.primary { flex: 1; margin-top: 0; width: auto; }
 .diary-actions .mini { margin-top: 0; padding: 11px 16px; font-size: 13px; }
+
+/* v12：文档面兜底入口（简报页底部链接） */
+.doclink { margin: 14px 4px 4px; }
+.doclink a { color: var(--fg-strong); text-decoration: none; font-weight: 600; margin-right: 6px; }
+.doclink span { font-size: 12px; }

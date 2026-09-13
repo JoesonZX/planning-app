@@ -15,11 +15,6 @@ const localToday = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
-const addDaysIso = (iso, n) => {
-  const d = new Date(iso + 'T12:00:00');
-  d.setDate(d.getDate() + n);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
 // 桥接：state 快照落后于设备时钟时，今天的数据从 week 对应日组取
 // （引擎 horizon=生成日+7，当日组就在 week 里）；快照正常则用 today 字段组
 function todayGroups(sd) {
@@ -40,7 +35,8 @@ function show(tab) {
   $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + tab));
   if (tab === 'assistant') { ensureChatContext(); renderInboxStrip(); }
   if (tab === 'today' && !$('#today-body').dataset.loaded) renderToday();
-  if (tab === 'plan' && !$('#plan-body').dataset.loaded) { renderPlan(); renderDocs(); }
+  if (tab === 'plan' && !$('#doc-reports').dataset.loaded) { $('#doc-reports').dataset.loaded = '1'; renderDocs(); }
+  if (tab === 'diary' && !$('#diary-body').dataset.loaded) renderDiary();
 }
 function toast(msg, err = false) {
   const t = $('#toast');
@@ -113,10 +109,6 @@ const miscFold = (arr) => (arr && arr.length)
   ? `<details class="misifold"><summary>其他带日期 ${arr.length}</summary>` +
     `<div class="cards">${arr.map(it => itemCard(it, { kind: 'misc' })).join('')}</div></details>`
   : '';
-const spansFold = (arr) => (arr && arr.length)
-  ? `<details class="misifold spansfold"><summary>跨多日 ${arr.length}</summary>` +
-    `<div class="cards">${arr.map(it => itemCard(it)).join('')}</div></details>`
-  : '';
 
 function bindRows(container) {
   // v11：条目卡是框架的投影（只读）——点行 = 打开源文件看上下文，编辑与整理在文档面/提案
@@ -174,7 +166,7 @@ async function renderToday() {
     }
     const t = localToday();
     const { items, sched, misc } = todayGroups(sd);
-    let html = `<h2 class="sec">今天 · ${fmtDay(t)}</h2>`;
+    let html = `<h2 class="sec">今日简报 · ${fmtDay(t)}</h2>`;
     if (t > sd.today)
       html += `<p class="dim small">引擎快照还是 ${fmtDay(sd.today)}——今天内容从周计划桥接</p>`;
     // 时间线
@@ -191,66 +183,30 @@ async function renderToday() {
       ? `<h2 class="sec">今日推进</h2><p class="dim small">计划中今天的位置 · 执行细节在你的 todo 应用</p><div class="cards">${items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>`
       : emptyState('', '今天没有框架内的推进项——想推进什么，记进你的 todo 应用');
     html += miscFold(misc);
-    html += `<button id="btn-diary" class="diary-entry"><b>日记</b><span>记一笔今天 · 做了什么与感受</span></button>`;
     if (state.statsData) html += renderHeatmap(state.statsData);
+    html += `<p class="doclink"><a href="#" id="goto-docs">文档与报告 →</a><span class="dim small">（规划文件与晚报的兜底入口；月计划直接打开就是本月视图）</span></p>`;
     el.innerHTML = html;
     bindRows(el);
-    const db = document.querySelector('#btn-diary');
-    if (db) db.addEventListener('click', () =>
-      openDiary({ put: (p, t2, m) => writeFile(p, t2, m), toast, dateStr: t }));
+    el.querySelector('#goto-docs').addEventListener('click', e => {
+      e.preventDefault();
+      show('plan');
+    });
   } catch (e) {
     el.innerHTML = emptyState('', 'state.json 还没生成——今晚 21:00 的晚间报告会带上它',
       e.message.includes('404') ? '' : `<p class="dim small">${e.message}</p>`);
   }
 }
 
-// ---------- 计划 ----------
-async function renderPlan() {
-  const el = $('#plan-body');
-  el.innerHTML = skeleton();
+// ---------- 日记（v12：从今天视图按钮升格为三入口之一；双区制不变） ----------
+function renderDiary() {
+  const el = $('#diary-body');
+  const t = localToday();
+  el.innerHTML = `<h2 class="sec">日记 · ${fmtDay(t)}</h2>` +
+    `<p class="dim small">「做了什么」进周报摘要；「感受」只属于你——任何报告都不读取</p>` +
+    `<button id="btn-diary" class="diary-entry"><b>日记</b><span>记一笔今天 · 做了什么与感受</span></button>`;
   el.dataset.loaded = '1';
-  try {
-    const sd = state.stateData || (state.stateData = await fetchJSON('reports/state.json'));
-    const t = localToday();
-    if (sd.month) { el.innerHTML = renderMonth(sd, t); bindRows(el); return; }
-    const groups = (sd.week || []).filter(g => g.date >= t);  // 旧快照回退 week
-    if (!groups.length) { el.innerHTML = emptyState('', '未来 7 天没有安排'); return; }
-    el.innerHTML = groups.map(g => {
-      const rel = g.date === t ? '今天 · ' : g.date === addDaysIso(t, 1) ? '明天 → ' : '';
-      const items = (g.items || []).length
-        ? `<div class="cards">${g.items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>` : '';
-      const sched = (g.sched || []).length
-        ? `<div class="cards sched">${g.sched.map(it => itemCard(it, { kind: 'sched' })).join('')}</div>` : '';
-      return `<h3 class="dayhead">${rel}${fmtDay(g.date)}</h3>${items}${sched}${miscFold(g.misc)}`;
-    }).join('');
-    bindRows(el);
-  } catch (e) {
-    el.innerHTML = emptyState('', '计划数据来自每晚的 state.json（今晚起生成）', e.message);
-  }
-}
-
-// v10 月视图：跨多日区 → 过去区（默认折叠，专供清理）→ 今天起逐天到月底
-function renderMonth(sd, t) {
-  const m = sd.month;
-  const keys = Object.keys(m.days).sort();
-  const past = keys.filter(k => k < t);
-  const future = keys.filter(k => k >= t);
-  const dayGroup = (k, g, isPast) => {
-    const rel = k === t ? '今天 · ' : k === addDaysIso(t, 1) ? '明天 → ' : '';
-    const items = (g.items || []).length
-      ? `<div class="cards">${g.items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>` : '';
-    const sched = (g.sched || []).length
-      ? `<div class="cards sched">${g.sched.map(it => itemCard(it, { kind: 'sched' })).join('')}</div>` : '';
-    return `<h3 class="dayhead${isPast ? ' past' : ''}">${rel}${fmtDay(k)}</h3>${items}${sched}${miscFold(g.misc)}`;
-  };
-  let html = spansFold(m.spans || []);
-  if (past.length) {
-    const n = past.reduce((acc, k) => acc + m.days[k].items.length, 0);
-    html += `<details class="pastfold"><summary>${m.label}已过去 · ${n} 条未完成，点开清理</summary>` +
-      past.map(k => dayGroup(k, m.days[k], true)).join('') + `</details>`;
-  }
-  html += future.map(k => dayGroup(k, m.days[k], false)).join('');
-  return html || emptyState('', '本月还没有安排');
+  el.querySelector('#btn-diary').addEventListener('click', () =>
+    openDiary({ put: (p, t2, m) => writeFile(p, t2, m), toast, dateStr: t }));
 }
 
 // ---------- 收件箱（并入助手 tab：乐观纸条 + 展开/删除） ----------
@@ -804,13 +760,15 @@ async function refreshAll(full = false) {
   state.stateData = state.statsData = null;
   state.fileCache = {}; // bot 可能已更新文件，强制重拉
   $('#today-body').dataset.loaded = '';
-  $('#plan-body').dataset.loaded = '';
+  $('#doc-reports').dataset.loaded = '';
+  $('#diary-body').dataset.loaded = '';
   state.chatContext = null;
   await renderDocs();
   await renderToday();
   $('#today-body').dataset.loaded = '1';
-  // 跨天刷新时若正停在计划 tab，就地重渲染（否则陈旧分组留屏直到切走再切回）
-  if ($('#view-plan').classList.contains('active')) await renderPlan();
+  // 跨天刷新时若正停在文档/日记 tab，就地重渲染（否则陈旧内容留屏直到切走再切回）
+  if ($('#view-plan').classList.contains('active')) { $('#doc-reports').dataset.loaded = '1'; await renderDocs(); }
+  if ($('#view-diary').classList.contains('active')) renderDiary();
   renderInboxStrip();
 }
 let gChord = false;
@@ -821,7 +779,7 @@ function bindKeys() {
     if (typing || e.metaKey || e.ctrlKey) return;
     if (gChord) {
       gChord = false;
-      const map = { t: 'today', p: 'plan', a: 'assistant' };
+      const map = { t: 'today', p: 'plan', a: 'assistant', d: 'diary' };
       if (map[e.key]) { show(map[e.key]); return; }
     }
     if (e.key === 'g') { gChord = true; setTimeout(() => gChord = false, 900); }
@@ -850,7 +808,6 @@ function bindNav() {
   $$('.tab-btn').forEach(b => b.addEventListener('click', () => show(b.dataset.tab)));
   $$('.subtab').forEach(b => b.addEventListener('click', () => {
     $$('.subtab').forEach(x => x.classList.toggle('active', x === b));
-    $('#plan-tasks').classList.toggle('hidden', b.dataset.doc !== 'tasks');
     $('#doc-reports').classList.toggle('hidden', b.dataset.doc !== 'reports');
     $('#doc-files').classList.toggle('hidden', b.dataset.doc !== 'files');
   }));

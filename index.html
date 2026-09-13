@@ -8,13 +8,13 @@
 <meta name="theme-color" content="#ffffff">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
-<title>规划</title>
+<title>规划秘书</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <button id="btn-settings" class="iconbtn" title="设置" aria-label="设置">☰</button>
-  <h1>规划</h1>
+  <h1>规划秘书</h1>
   <span id="conn" class="dim">未连接</span>
   <button id="btn-refresh" class="iconbtn" title="刷新 (r)">⟳</button>
 </header>
@@ -34,15 +34,13 @@
     <div id="today-body"></div>
   </section>
 
-  <!-- 计划（任务 / 报告 / 文件） -->
+  <!-- 计划（报告 / 文件 —— 文档面，兜底编辑入口；月视图已并入月计划 md 直读） -->
   <section id="view-plan" class="view">
     <div class="subtabs">
-      <button class="subtab active" data-doc="tasks">任务</button>
-      <button class="subtab" data-doc="reports">报告</button>
+      <button class="subtab active" data-doc="reports">报告</button>
       <button class="subtab" data-doc="files">文件</button>
     </div>
-    <div id="plan-tasks"><div id="plan-body"></div></div>
-    <div id="doc-reports" class="hidden">
+    <div id="doc-reports">
       <div id="report-chips"></div>
       <div id="report-body" class="md"></div>
     </div>
@@ -72,6 +70,10 @@
       <button id="btn-note" disabled>记下</button>
       <button id="chat-send" disabled title="提问">↑</button>
     </div>
+  </section>
+  <!-- 日记（三入口之一：双区制，感受区红线） -->
+  <section id="view-diary" class="view">
+    <div id="diary-body"></div>
   </section>
 </main>
 
@@ -128,9 +130,9 @@
 <div id="loading"></div>
 
 <nav>
-  <button class="tab-btn active" data-tab="today">今天</button>
-  <button class="tab-btn" data-tab="plan">计划</button>
-  <button class="tab-btn" data-tab="assistant">助手</button>
+  <button class="tab-btn active" data-tab="today">简报</button>
+  <button class="tab-btn" data-tab="assistant">秘书</button>
+  <button class="tab-btn" data-tab="diary">日记</button>
 </nav>
 
 <script type="module" src="js/app.js"></script>
