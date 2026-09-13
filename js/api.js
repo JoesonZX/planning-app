@@ -1,9 +1,15 @@
 // api.js — GitHub Contents/Trees API 客户端（fine-grained PAT，仅 planning-data 读写）
 import { settings } from './store.js';
 
+// ?mock：本地冒烟模式——请求走 js/mock.js 的内存仓（不触网；v9 测试基建，生产无感）
+const MOCK = /[?&]mock\b/.test(location.search) || /mock/.test(location.hash);
+let mockRoute = null;
+if (MOCK) mockRoute = (await import('./mock.js')).route;
+
 const API = 'https://api.github.com';
 
 async function gh(path, opts = {}) {
+  if (mockRoute) return mockRoute(path, opts);
   const s = settings.load();
   const res = await fetch(API + path, {
     ...opts,

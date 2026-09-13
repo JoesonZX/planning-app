@@ -9,6 +9,27 @@ import { openDiary } from './diary.js';
 const VAPID_PUBLIC = 'BPkee1I-7uyoJVE6Df3nIa9UqHT3vGKBnofIn7VwAWq9uuVbrHqLbaEOvDoiPCXVT7UdrSPtQBgl_Se44wCr-pE';
 const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六'];
 
+// v9：设备时钟是「今天」的唯一权威（state.today 由生成时刻写死——凌晨 0 点到
+// 晨间刷新之间是昨天）。state.today 只在设备时钟反常落后时兜底。
+const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const addDaysIso = (iso, n) => {
+  const d = new Date(iso + 'T12:00:00');
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+// 桥接：state 快照落后于设备时钟时，今天的数据从 week 对应日组取
+// （引擎 horizon=生成日+7，当日组就在 week 里）；快照正常则用 today 字段组
+function todayGroups(sd) {
+  const t = localToday();
+  if (!sd || t <= sd.today)
+    return { items: sd?.today_items || [], sched: sd?.sched_today || [], misc: sd?.misc_today || [] };
+  const g = (sd.week || []).find(x => x.date === t);
+  return { items: g?.items || [], sched: g?.sched || [], misc: g?.misc || [] };
+}
+
 const state = { tree: [], fileCache: {}, currentFile: null, stateData: null, statsData: null, chatContext: null };
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -46,7 +67,11 @@ async function fetchFile(path) {
 }
 async function writeFile(path, textOrFn, message) {
   const cached = state.fileCache[path];
-  const sha = cached ? cached.sha : (await getContent(path)).sha;
+  let sha = cached ? cached.sha : null;
+  if (!cached) {
+    try { sha = (await getContent(path)).sha; }
+    catch (e) { if (e.status !== 404) throw e; }  // 新文件（如首篇日记）：无 sha，PUT 不带 sha 即创建
+  }
   const { sha: newSha, unchanged } = await putContent(path, textOrFn, sha, message);
   const text = typeof textOrFn === 'function'
     ? (await getContent(path)).text : textOrFn;
@@ -58,87 +83,121 @@ async function fetchJSON(path) {
   return JSON.parse(f.text);
 }
 
-// 状态条目勾选 → 翻转源文件对应行
-async function toggleStateItem(file, lineNo, inputEl) {
-  vibrate();
-  try {
-    await fetchFile(file);
-    await writeFile(file,
-      cur => flipCheckbox(cur.split('\n'), lineNo - 1)?.join('\n'),
-      `app: ${file} 行 ${lineNo} 勾选`);
-    inputEl.closest('.cb')?.querySelector('span')?.classList.toggle('done', inputEl.checked);
-    toast('✓ 已同步');
-  } catch (e) {
-    inputEl.checked = !inputEl.checked;
-    delete state.fileCache[file];
-    toast('同步失败，' + e.message, true);
-  }
-}
-function bindCb(container) {
-  container.querySelectorAll('.cb[data-file]').forEach(input => {
-    input.addEventListener('change', () =>
-      toggleStateItem(input.dataset.file, +input.dataset.line, input));
-  });
-  // 任务卡菜单：⋯ → 删除 / 改期（直接写回，不经 LLM；成功后本地补丁刷新视图）
-  container.querySelectorAll('.tmenu').forEach(b => b.addEventListener('click', e => {
-    e.preventDefault();
-    const f = b.dataset.f, l = +b.dataset.l;
-    const ans = prompt('删除这条任务请输「删」；改期请输入新日期（如 9/20）：', '');
-    if (!ans) return;
-    if (ans.trim() === '删') {
-      busy(writeFile(f, cur => cur.split('\n').filter((_, i) => i !== l - 1).join('\n'),
-        `app: 删除任务 ${f}:${l}`)).then(() => { vibrate(); toast('已删除'); patchLocalRemove(f, l); })
-        .catch(err => toast('删除失败：' + err.message, true));
-    } else {
-      const nd = ans.trim().match(/^(\d{1,2})[\/.](\d{1,2})$/);
-      if (!nd) { toast('没看懂——「删」或新日期如 9/20', true); return; }
-      busy(writeFile(f, cur => {
-        const lines = cur.split('\n');
-        if (l - 1 >= lines.length) throw new Error('行号已失效，请刷新');
-        const before = lines[l - 1];
-        const after = before.replace(/(\d{1,2})[.\/](\d{1,2})/, `${+nd[1]}/${+nd[2]}`);
-        if (after === before) throw new Error('该行没有 M/D 日期可改');
-        lines[l - 1] = after;
-        return lines.join('\n');
-      }, `app: 任务改期 ${f}:${l} → ${+nd[1]}/${+nd[2]}`))
-        .then(() => {
-          vibrate(); toast('✓ 已改期');
-          const moved = state.fileCache[f]?.lines?.[l - 1];
-          patchLocalRemove(f, l);
-          if (moved) patchLocalInsert({
-            t: moved.replace(/^[-*]\s+\[[ xX]\]\s*/, ''),
-            s: moved.includes('⭐'), d: /\[x\]/i.test(moved), f, l,
-            dates: [`${new Date().getFullYear()}-${String(+nd[1]).padStart(2, '0')}-${String(+nd[2]).padStart(2, '0')}`],
-          });
-        })
-        .catch(err => toast('改期失败：' + err.message, true));
-    }
-  }));
-  // 日程卡转正：把日程条目登记为真任务（追加 checkbox 行到同文件末尾）
-  container.querySelectorAll('.tconv').forEach(b => b.addEventListener('click', () => {
-    const f = b.dataset.f, t = b.dataset.t;
-    busy(writeFile(f, cur => cur.replace(/\s*$/, '') + `\n- [ ] ${t}（转自日程）\n`,
-      'app: 日程转任务')).then(() => {
-      vibrate(); toast('✓ 已登记为任务（无日期，周报/滑落跟踪）');
-      const cached = state.fileCache[f];
-      const lineNo = cached ? cached.lines.findIndex(ln => ln.includes(t.slice(0, 20)) && ln.includes('转自日程')) : -1;
-      patchLocalInsert({ t: `${t}（转自日程）`, s: false, d: false, f, l: lineNo + 1, dates: [state.stateData?.today] });
-    })
-      .catch(err => toast('失败：' + err.message, true));
-  }));
-}
+// ---------- 条目行 + 底部动作表（v9：无完成交互，点任意条目行 = 动作表） ----------
+// 红线纵深防御：日记/与 reports/ 的行不可经动作表删改（引擎本就不会输出它们）
+const safeFile = f => !/^日记\//.test(f || '') && !/^reports\//.test(f || '');
+// 语义键（与引擎 norm_text 同思路）：删除前按内容软校验，防渲染到点击之间行号漂移
+const normKey = s => (s || '').replace(/\s+/g, '').replace(/[*_`#>|（）()【】\[\]]/g, '');
+
 const itemCard = (it, opts = {}) => {
-  const inner = `<span class="${it.d ? 'done' : ''}">${inline((it.s ? '' : '') + it.t)}</span>`
-    + `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}${(it.src && it.src.length > 1) ? ` +${it.src.length - 1} 处重复` : ''}）</em>`;
-  if (typeof it.d === 'boolean')
-    return `<label class="cb" data-file="${it.f}" data-line="${it.l}">` +
-      `<input type="checkbox" ${it.d ? 'checked' : ''}>${inner}` +
-      (opts.menu ? `<button class="mini tmenu" data-f="${it.f}" data-l="${it.l}" data-t="${escapeHtml((it.t || '').slice(0, 24))}">⋯</button>` : '') +
-      `</label>`;
-  return `<div class="cb static">${inner}` +
-    (opts.menu && opts.convert ? `<button class="mini tconv" data-f="${it.f}" data-t="${escapeHtml((it.t || '').slice(0, 60))}">转任务</button>` : '') +
-    `</div>`;
+  const kind = opts.kind || (typeof it.d === 'boolean' ? 'task' : 'sched');
+  const dup = (it.src && it.src.length > 1) ? ` +${it.src.length - 1} 处重复` : '';
+  const srcAttr = dup ? ` data-src='${escapeHtml(JSON.stringify(it.src))}'` : '';
+  const inner = `<span class="${it.d ? 'done' : ''}">${inline(it.t)}</span>` +
+    `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}${dup}）</em>`;
+  return `<div class="cb act" data-kind="${kind}" data-f="${it.f}" data-l="${it.l}"` +
+    ` data-t="${escapeHtml((it.t || '').slice(0, 40))}" data-s="${it.s ? 1 : ''}"` +
+    ` data-date="${(it.dates && it.dates[0]) || ''}" data-seg="${it.seg ? 1 : ''}"${srcAttr}>${inner}</div>`;
 };
+const miscFold = (arr) => (arr && arr.length)
+  ? `<details class="misifold"><summary>其他带日期 ${arr.length}</summary>` +
+    `<div class="cards">${arr.map(it => itemCard(it, { kind: 'misc' })).join('')}</div></details>`
+  : '';
+
+function bindRows(container) {
+  container.querySelectorAll('.cb.act[data-f]').forEach(row =>
+    row.addEventListener('click', () => openActionSheet({ ...row.dataset })));
+}
+
+function closeSheet() {
+  $('#actionsheet')?.remove();
+  $('#sheet-backdrop')?.remove();
+}
+function openActionSheet(d) {
+  closeSheet();
+  vibrate();
+  const delLabel = d.src ? `删除（含 ${JSON.parse(d.src).length} 处重复）` : '删除';
+  const segNote = d.seg ? ' · 多日框架行，删除移除整行' : '';
+  const dateRow = d.seg ? '' :
+    `<div class="sheet-date"><input type="date" id="sheet-date" value="${d.date || ''}">` +
+    `<button class="sheet-btn accent" data-act="resched">改期</button></div>`;
+  const convBtn = d.kind === 'sched' ? `<button class="sheet-btn accent" data-act="conv">转任务</button>` : '';
+  const delBtn = safeFile(d.f) ? `<button class="sheet-btn danger" data-act="del">${delLabel}</button>` : '';
+  const el = document.createElement('div');
+  el.id = 'actionsheet';
+  el.innerHTML = `<div class="sheet-title">${escapeHtml(d.t || '（无文本）')}</div>` +
+    `<div class="sheet-sub">（${d.f.replace(/^规划\//, '').replace(/\.md$/, '')}）${segNote}</div>` +
+    convBtn + dateRow + delBtn +
+    `<button class="sheet-cancel" data-act="cancel">取消</button>`;
+  const bd = document.createElement('div');
+  bd.id = 'sheet-backdrop';
+  document.body.appendChild(bd);
+  document.body.appendChild(el);
+  requestAnimationFrame(() => { bd.classList.add('on'); el.classList.add('on'); });
+  bd.addEventListener('click', closeSheet);
+  el.addEventListener('click', e => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (!act) return;
+    if (act === 'cancel') closeSheet();
+    else if (act === 'del') sheetDelete(d);
+    else if (act === 'resched') sheetResched(d, $('#sheet-date')?.value);
+    else if (act === 'conv') sheetConvert(d);
+  });
+}
+async function sheetDelete(d) {
+  const targets = d.src ? JSON.parse(d.src) : [[d.f, +d.l]];
+  try {
+    for (const [f, l] of targets) {
+      if (!safeFile(f)) throw new Error('该文件不可在此删除');
+      await writeFile(f, cur => {
+        const lines = cur.split('\n');
+        if (l - 1 >= lines.length || !lines[l - 1].trim()) throw new Error('该行已变化，请刷新后重试');
+        const hit = normKey(d.t).slice(0, 12);
+        if (hit && !normKey(lines[l - 1]).includes(hit)) throw new Error('该行已变化，请刷新后重试');
+        return lines.filter((_, i) => i !== l - 1).join('\n');
+      }, `app: 删除条目 ${f}:${l}`);
+    }
+    vibrate(); closeSheet(); toast('已删除');
+    patchLocalRemoveTargets(targets);
+  } catch (e) { closeSheet(); toast('删除失败：' + e.message, true); }
+}
+async function sheetResched(d, val) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val || '');
+  if (!m) { closeSheet(); return toast('先选一个日期', true); }
+  try {
+    const { unchanged } = await writeFile(d.f, cur => {
+      const lines = cur.split('\n');
+      if (d.l - 1 >= lines.length) throw new Error('行号已失效，请刷新');
+      const before = lines[d.l - 1];
+      const after = before.replace(/(\d{1,2})[.\/](\d{1,2})/, `${+m[2]}/${+m[3]}`);
+      if (after === before) throw new Error('该行没有 M/D 日期可改');
+      lines[d.l - 1] = after;  // v9 复查：算出 after 必须写回——否则整文件原文返回，unchanged 假成功
+      return lines.join('\n');
+    }, `app: 条目改期 ${d.f}:${d.l} → ${+m[2]}/${+m[3]}`);
+    vibrate(); closeSheet();
+    toast(unchanged ? '该条已是所选日期' : '✓ 已改期');
+    const moved = state.fileCache[d.f]?.lines?.[d.l - 1];
+    patchLocalRemoveTargets([[d.f, +d.l]]);
+    if (moved && !unchanged) patchLocalInsert({
+      t: moved.replace(/^[-*]\s+\[[ xX]\]\s*/, '').replace(/^>\s*/, '').replace(/\r$/, ''),
+      s: d.s === '1',
+      d: d.kind === 'task' ? /\[x\]/i.test(moved) : undefined,
+      f: d.f, l: +d.l, dates: [`${m[1]}-${m[2]}-${m[3]}`],
+    }, d.kind);
+  } catch (e) { closeSheet(); toast('改期失败：' + e.message, true); }
+}
+async function sheetConvert(d) {
+  const text = (d.t || '').slice(0, 60);
+  try {
+    await writeFile(d.f, cur => cur.replace(/\s*$/, '') + `\n- [ ] ${text}（转自日程）\n`,
+      'app: 日程转任务');
+    vibrate(); closeSheet();
+    toast('✓ 已登记为任务（无日期，滑落跟踪）');
+    const cached = state.fileCache[d.f];
+    const lineNo = cached ? cached.lines.findIndex(ln => ln.includes('转自日程') && ln.includes(text.slice(0, 20))) : -1;
+    patchLocalInsert({ t: `${text}（转自日程）`, s: false, d: false, f: d.f, l: lineNo + 1, dates: [localToday()] });
+  } catch (e) { closeSheet(); toast('失败：' + e.message, true); }
+}
 
 // ---------- 今天 ----------
 function fmtDay(iso, withWeek = true) {
@@ -178,8 +237,11 @@ async function renderToday() {
     if (!state.statsData) {
       try { state.statsData = await fetchJSON('reports/stats.json'); } catch { /* 无热力图数据不致命 */ }
     }
-    const today = sd.today;
-    let html = `<h2 class="sec">今天 · ${fmtDay(today)}</h2>`;
+    const t = localToday();
+    const { items, sched, misc } = todayGroups(sd);
+    let html = `<h2 class="sec">今天 · ${fmtDay(t)}</h2>`;
+    if (t > sd.today)
+      html += `<p class="dim small">引擎快照还是 ${fmtDay(sd.today)}——今天内容从周计划桥接</p>`;
     // 时间线
     if (sd.timeline?.length) {
       html += '<div class="timeline">';
@@ -187,21 +249,22 @@ async function renderToday() {
         html += `<div class="trow"><b>${time}</b><span>${label}</span></div>`;
       html += '</div>';
     }
-    html += sd.today_items.length
-      ? `<div class="cards">${sd.today_items.map(it => itemCard(it, { menu: true })).join('')}</div>`
+    // 日程安排在上（按计划走，不算任务），代办事项在下（v9 两区排列）
+    if (sched.length)
+      html += `<h2 class="sec">日程安排</h2><div class="cards sched">${sched.map(it => itemCard(it, { kind: 'sched' })).join('')}</div>`;
+    html += items.length
+      ? `<h2 class="sec">代办事项</h2><div class="cards">${items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>`
       : emptyState('', '今天没有标注任务——把明天要做的提前想好');
-    if (sd.sched_today?.length) {
-      html += `<h2 class="sec">日程（按计划走，不算任务）</h2><div class="cards sched">${sd.sched_today.map(it => itemCard(it, { menu: false, convert: true })).join('')}</div>`;
-    }
+    html += miscFold(misc);
     html += `<button id="btn-diary" class="diary-entry"><b>日记</b><span>记一笔今天 · 做了什么与感受</span></button>`;
     if (sd.stale.length)
-      html += `<h2 class="sec">滑落（拖了很久）</h2><div class="cards">${sd.stale.map(it => itemCard(it, { menu: true })).join('')}</div>`;
+      html += `<h2 class="sec">滑落（拖了很久）</h2><div class="cards">${sd.stale.map(it => itemCard(it, { kind: 'task' })).join('')}</div>`;
     if (state.statsData) html += renderHeatmap(state.statsData);
     el.innerHTML = html;
-    bindCb(el);
+    bindRows(el);
     const db = document.querySelector('#btn-diary');
     if (db) db.addEventListener('click', () =>
-      openDiary({ put: (p, t, m) => writeFile(p, t, m), toast, dateStr: sd.today }));
+      openDiary({ put: (p, t2, m) => writeFile(p, t2, m), toast, dateStr: t }));
   } catch (e) {
     el.innerHTML = emptyState('', 'state.json 还没生成——今晚 21:00 的晚间报告会带上它',
       e.message.includes('404') ? '' : `<p class="dim small">${e.message}</p>`);
@@ -229,17 +292,18 @@ async function renderPlan() {
   el.dataset.loaded = '1';
   try {
     const sd = state.stateData || (state.stateData = await fetchJSON('reports/state.json'));
-    const today = sd.today;
-    if (!sd.week.length) { el.innerHTML = emptyState('', '未来 7 天没有安排'); return; }
-    el.innerHTML = sd.week.map(g => {
-      const d = new Date(g.date + 'T12:00:00');
-      const rel = g.date === today ? '明天→' : '';
+    const t = localToday();
+    const groups = (sd.week || []).filter(g => g.date >= t);  // 今天起（v9 桥接后不再显示过去的组）
+    if (!groups.length) { el.innerHTML = emptyState('', '未来 7 天没有安排'); return; }
+    el.innerHTML = groups.map(g => {
+      const rel = g.date === t ? '今天 · ' : g.date === addDaysIso(t, 1) ? '明天 → ' : '';
+      const items = (g.items || []).length
+        ? `<div class="cards">${g.items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>` : '';
       const sched = (g.sched || []).length
-        ? `<div class="cards sched">${g.sched.map(itemCard).join('')}</div>` : '';
-      return `<h3 class="dayhead">${rel}${fmtDay(g.date)}</h3>
-        <div class="cards">${g.items.map(it => itemCard(it, { menu: true })).join('')}</div>${sched}`;
+        ? `<div class="cards sched">${g.sched.map(it => itemCard(it, { kind: 'sched' })).join('')}</div>` : '';
+      return `<h3 class="dayhead">${rel}${fmtDay(g.date)}</h3>${items}${sched}${miscFold(g.misc)}`;
     }).join('');
-    bindCb(el);
+    bindRows(el);
   } catch (e) {
     el.innerHTML = emptyState('', '计划数据来自每晚的 state.json（今晚起生成）', e.message);
   }
@@ -363,23 +427,39 @@ function rerenderTaskViews() {
   if ($('#view-today').classList.contains('active')) renderToday();
   if ($('#view-plan').classList.contains('active')) { renderPlan(); renderDocs(); }
 }
-function patchLocalRemove(f, l) {
+function patchLocalRemoveTargets(targets) {
   const sd = state.stateData;
+  const hit = it => targets.some(([f, l]) => it.f === f && it.l === l);
   if (!sd) return rerenderTaskViews();
-  sd.today_items = (sd.today_items || []).filter(it => !(it.f === f && it.l === l));
-  (sd.week || []).forEach(g => { g.items = (g.items || []).filter(it => !(it.f === f && it.l === l)); });
-  sd.stale = (sd.stale || []).filter(it => !(it.f === f && it.l === l));
+  sd.today_items = (sd.today_items || []).filter(it => !hit(it));
+  sd.sched_today = (sd.sched_today || []).filter(it => !hit(it));
+  sd.misc_today = (sd.misc_today || []).filter(it => !hit(it));
+  (sd.week || []).forEach(g => {
+    g.items = (g.items || []).filter(it => !hit(it));
+    g.sched = (g.sched || []).filter(it => !hit(it));
+    g.misc = (g.misc || []).filter(it => !hit(it));
+  });
+  sd.stale = (sd.stale || []).filter(it => !hit(it));
   rerenderTaskViews();
 }
-function patchLocalInsert(item) {
+const patchLocalRemove = (f, l) => patchLocalRemoveTargets([[f, l]]);
+function patchLocalInsert(item, kind = 'task') {
   const sd = state.stateData;
   if (!sd) return rerenderTaskViews();
+  const t = localToday();
   const d = (item.dates || [])[0];
-  if (d === sd.today) sd.today_items.push(item);
-  else if (d && d > sd.today) {
+  const slot = g => (kind === 'sched' ? g.sched : kind === 'misc' ? g.misc : g.items);
+  if (d === t) {
+    if (t <= sd.today) (kind === 'sched' ? sd.sched_today : kind === 'misc' ? sd.misc_today : sd.today_items).push(item);
+    else {
+      let g = (sd.week || []).find(x => x.date === d);
+      if (!g) { g = { date: d, items: [], sched: [], misc: [] }; sd.week.push(g); sd.week.sort((a, b) => a.date < b.date ? -1 : 1); }
+      slot(g).push(item);
+    }
+  } else if (d && d > t) {
     let g = (sd.week || []).find(x => x.date === d);
-    if (!g) { g = { date: d, items: [], sched: [] }; sd.week.push(g); sd.week.sort((a, b) => a.date < b.date ? -1 : 1); }
-    g.items.push(item);
+    if (!g) { g = { date: d, items: [], sched: [], misc: [] }; sd.week.push(g); sd.week.sort((a, b) => a.date < b.date ? -1 : 1); }
+    slot(g).push(item);
   }
   rerenderTaskViews();
 }
@@ -946,6 +1026,15 @@ function bindNav() {
 }
 async function boot() {
   bindNav();
+  // 跨天自动刷新：PWA 挂夜后恢复前台时，设备日期变了就重拉（配合 localToday 桥接）
+  state.lastDay = localToday();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && settings.load().pat &&
+        localToday() !== state.lastDay) {
+      state.lastDay = localToday();
+      refreshAll().then(() => toast('新的一天，已刷新'));
+    }
+  });
   const s = settings.load();
   fillSettings();
   initPushBtn();

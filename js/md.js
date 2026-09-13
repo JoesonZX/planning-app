@@ -74,8 +74,8 @@ export function render(text) {
     // 分隔线
     if (/^(-{3,}|\*{3,})$/.test(trimmed)) { out.push('<hr>'); i++; continue; }
 
-    // checkbox（带原始行号）
-    const cb = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s*(.*)$/);
+    // checkbox（带原始行号）——行尾 \r 容错（CRLF 文件：Windows 编辑器/Obsidian 常见）
+    const cb = line.replace(/\r$/, '').match(/^(\s*)[-*]\s+\[([ xX])\]\s*(.*)$/);
     if (cb) {
       const checked = cb[2].toLowerCase() === 'x';
       out.push(
@@ -121,13 +121,13 @@ export function render(text) {
   return { html: out.join('\n'), lines };
 }
 
-// 翻转 lines[idx] 的 checkbox（精确行操作，其余内容零改动）
+// 翻转 lines[idx] 的 checkbox（精确行操作，其余内容零改动）——容忍行尾 \r（CRLF）
 export function flipCheckbox(lines, idx) {
-  const m = lines[idx].match(/^(\s*[-*]\s+\[)([ xX])(\].*)$/);
+  const m = lines[idx].match(/^(\s*[-*]\s+\[)([ xX])(\].*?)\r?$/);
   if (!m) return null;
   const next = m[2] === ' ' ? 'x' : ' ';
-  const flipped = m[1] + next + m[3];
+  const cr = lines[idx].endsWith('\r') ? '\r' : '';
   const out = lines.slice();
-  out[idx] = flipped;
+  out[idx] = m[1] + next + m[3] + cr;
   return out.join('\n');
 }
