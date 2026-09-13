@@ -386,7 +386,8 @@ function patchLocalInsert(item) {
 async function addTaskDirect() {
   const text = $('#nt-text').value.trim();
   if (!text) return;
-  const file = $('#nt-file').value;
+  // v8 紧凑表单去掉了文件选择——默认执行清单（学期主文件）；要进别的文件用聊天提案
+  const file = '规划/26fall 9月执行清单.md';
   const dv = $('#nt-date').value.trim();
   const today = new Date();
   const m = dv.match(/^(\d{1,2})[\/.](\d{1,2})$/);
