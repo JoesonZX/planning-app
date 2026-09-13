@@ -1,8 +1,9 @@
 // api.js — GitHub Contents/Trees API 客户端（fine-grained PAT，仅 planning-data 读写）
 import { settings } from './store.js';
 
-// ?mock：本地冒烟模式——请求走 js/mock.js 的内存仓（不触网；v9 测试基建，生产无感）
-const MOCK = /[?&]mock\b/.test(location.search) || /mock/.test(location.hash);
+// ?mock：本地冒烟模式——请求走 js/mock.js 的内存仓（不触网；v9 测试基建，生产无感）。
+// 只认 query（v9 复查：曾用 /mock/ 匹配 hash，任何深链含 mock 字样都会误入 mock 模式）
+const MOCK = /[?&]mock\b/.test(location.search);
 let mockRoute = null;
 if (MOCK) mockRoute = (await import('./mock.js')).route;
 

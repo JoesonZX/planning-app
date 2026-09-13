@@ -93,11 +93,14 @@ const itemCard = (it, opts = {}) => {
   const kind = opts.kind || (typeof it.d === 'boolean' ? 'task' : 'sched');
   const dup = (it.src && it.src.length > 1) ? ` +${it.src.length - 1} 处重复` : '';
   const srcAttr = dup ? ` data-src='${escapeHtml(JSON.stringify(it.src))}'` : '';
+  // 改期预填：行内多个日期时取第一个还没过去的（首个未来日期归因同引擎；dates[0] 可能已过期）
+  const dates = it.dates || [];
+  const defDate = dates.find(x => x >= localToday()) || dates[0] || '';
   const inner = `<span class="${it.d ? 'done' : ''}">${inline(it.t)}</span>` +
     `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}${dup}）</em>`;
   return `<div class="cb act" data-kind="${kind}" data-f="${it.f}" data-l="${it.l}"` +
-    ` data-t="${escapeHtml((it.t || '').slice(0, 40))}" data-s="${it.s ? 1 : ''}"` +
-    ` data-date="${(it.dates && it.dates[0]) || ''}" data-seg="${it.seg ? 1 : ''}"${srcAttr}>${inner}</div>`;
+    ` data-t="${escapeHtml((it.t || '').slice(0, 120))}" data-s="${it.s ? 1 : ''}"` +
+    ` data-date="${defDate}" data-seg="${it.seg ? 1 : ''}"${srcAttr}>${inner}</div>`;
 };
 const miscFold = (arr) => (arr && arr.length)
   ? `<details class="misifold"><summary>其他带日期 ${arr.length}</summary>` +
@@ -147,16 +150,18 @@ function openActionSheet(d) {
 async function sheetDelete(d) {
   const targets = d.src ? JSON.parse(d.src) : [[d.f, +d.l]];
   try {
-    for (const [f, l] of targets) {
-      if (!safeFile(f)) throw new Error('该文件不可在此删除');
-      await writeFile(f, cur => {
-        const lines = cur.split('\n');
-        if (l - 1 >= lines.length || !lines[l - 1].trim()) throw new Error('该行已变化，请刷新后重试');
-        const hit = normKey(d.t).slice(0, 12);
-        if (hit && !normKey(lines[l - 1]).includes(hit)) throw new Error('该行已变化，请刷新后重试');
-        return lines.filter((_, i) => i !== l - 1).join('\n');
-      }, `app: 删除条目 ${f}:${l}`);
-    }
+    await busy((async () => {
+      for (const [f, l] of targets) {
+        if (!safeFile(f)) throw new Error('该文件不可在此删除');
+        await writeFile(f, cur => {
+          const lines = cur.split('\n');
+          if (l - 1 >= lines.length || !lines[l - 1].trim()) throw new Error('该行已变化，请刷新后重试');
+          const hit = normKey(d.t).slice(0, 12);
+          if (hit && !normKey(lines[l - 1]).includes(hit)) throw new Error('该行已变化，请刷新后重试');
+          return lines.filter((_, i) => i !== l - 1).join('\n');
+        }, `app: 删除条目 ${f}:${l}`);
+      }
+    })());
     vibrate(); closeSheet(); toast('已删除');
     patchLocalRemoveTargets(targets);
   } catch (e) { closeSheet(); toast('删除失败：' + e.message, true); }
@@ -165,7 +170,7 @@ async function sheetResched(d, val) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val || '');
   if (!m) { closeSheet(); return toast('先选一个日期', true); }
   try {
-    const { unchanged } = await writeFile(d.f, cur => {
+    const { unchanged } = await busy(writeFile(d.f, cur => {
       const lines = cur.split('\n');
       if (d.l - 1 >= lines.length) throw new Error('行号已失效，请刷新');
       const before = lines[d.l - 1];
@@ -173,7 +178,7 @@ async function sheetResched(d, val) {
       if (after === before) throw new Error('该行没有 M/D 日期可改');
       lines[d.l - 1] = after;  // v9 复查：算出 after 必须写回——否则整文件原文返回，unchanged 假成功
       return lines.join('\n');
-    }, `app: 条目改期 ${d.f}:${d.l} → ${+m[2]}/${+m[3]}`);
+    }, `app: 条目改期 ${d.f}:${d.l} → ${+m[2]}/${+m[3]}`));
     vibrate(); closeSheet();
     toast(unchanged ? '该条已是所选日期' : '✓ 已改期');
     const moved = state.fileCache[d.f]?.lines?.[d.l - 1];
@@ -187,10 +192,10 @@ async function sheetResched(d, val) {
   } catch (e) { closeSheet(); toast('改期失败：' + e.message, true); }
 }
 async function sheetConvert(d) {
-  const text = (d.t || '').slice(0, 60);
+  const text = (d.t || '').slice(0, 120);
   try {
-    await writeFile(d.f, cur => cur.replace(/\s*$/, '') + `\n- [ ] ${text}（转自日程）\n`,
-      'app: 日程转任务');
+    await busy(writeFile(d.f, cur => cur.replace(/\s*$/, '') + `\n- [ ] ${text}（转自日程）\n`,
+      'app: 日程转任务'));
     vibrate(); closeSheet();
     toast('✓ 已登记为任务（无日期，滑落跟踪）');
     const cached = state.fileCache[d.f];
@@ -947,13 +952,15 @@ async function refreshAll(full = false) {
   await renderDocs();
   await renderToday();
   $('#today-body').dataset.loaded = '1';
+  // 跨天刷新时若正停在计划 tab，就地重渲染（否则陈旧分组留屏直到切走再切回）
+  if ($('#view-plan').classList.contains('active')) await renderPlan();
   renderInboxStrip();
 }
 let gChord = false;
 function bindKeys() {
   document.addEventListener('keydown', e => {
     const typing = /INPUT|TEXTAREA|SELECT/.test(e.target.tagName);
-    if (e.key === 'Escape') { $('#file-viewer').classList.remove('on'); return; }
+    if (e.key === 'Escape') { $('#file-viewer').classList.remove('on'); closeSheet(); return; }
     if (typing || e.metaKey || e.ctrlKey) return;
     if (gChord) {
       gChord = false;
