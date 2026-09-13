@@ -90,13 +90,20 @@ const safeFile = f => !/^日记\//.test(f || '') && !/^reports\//.test(f || '');
 const normKey = s => (s || '').replace(/\s+/g, '').replace(/[*_`#>|（）()【】\[\]]/g, '');
 
 const itemCard = (it, opts = {}) => {
-  const kind = opts.kind || (typeof it.d === 'boolean' ? 'task' : 'sched');
+  const kind = opts.kind || it.k || (typeof it.d === 'boolean' ? 'task' : 'sched');
   const dup = (it.src && it.src.length > 1) ? ` +${it.src.length - 1} 处重复` : '';
   const srcAttr = dup ? ` data-src='${escapeHtml(JSON.stringify(it.src))}'` : '';
   // 改期预填：行内多个日期时取第一个还没过去的（首个未来日期归因同引擎；dates[0] 可能已过期）
   const dates = it.dates || [];
   const defDate = dates.find(x => x >= localToday()) || dates[0] || '';
-  const inner = `<span class="${it.d ? 'done' : ''}">${inline(it.t)}</span>` +
+  // v10 长行蒸馏：有 na（主旨句）默认显主旨，「全文」就地展开（引擎 rule_na 产物，na 是 t 的前缀）
+  const body = it.na
+    ? `<span class="na-wrap">` +
+      `<span class="na-brief${it.d ? ' done' : ''}">${inline(it.na)}</span>` +
+      `<span class="na-full hidden${it.d ? ' done' : ''}">${inline(it.t)}</span></span>` +
+      `<button class="mini na-toggle">全文</button>`
+    : `<span class="${it.d ? 'done' : ''}">${inline(it.t)}</span>`;
+  const inner = body +
     `<em>（${it.f.replace(/^规划\//, '').replace(/\.md$/, '')}${dup}）</em>`;
   return `<div class="cb act" data-kind="${kind}" data-f="${it.f}" data-l="${it.l}"` +
     ` data-t="${escapeHtml((it.t || '').slice(0, 120))}" data-s="${it.s ? 1 : ''}"` +
@@ -106,10 +113,24 @@ const miscFold = (arr) => (arr && arr.length)
   ? `<details class="misifold"><summary>其他带日期 ${arr.length}</summary>` +
     `<div class="cards">${arr.map(it => itemCard(it, { kind: 'misc' })).join('')}</div></details>`
   : '';
+const spansFold = (arr) => (arr && arr.length)
+  ? `<details class="misifold spansfold"><summary>跨多日 ${arr.length}</summary>` +
+    `<div class="cards">${arr.map(it => itemCard(it)).join('')}</div></details>`
+  : '';
 
 function bindRows(container) {
   container.querySelectorAll('.cb.act[data-f]').forEach(row =>
     row.addEventListener('click', () => openActionSheet({ ...row.dataset })));
+  // v10 长行蒸馏：全文/主旨切换（不触发动作表）
+  container.querySelectorAll('.na-toggle').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    const wrap = b.closest('.cb').querySelector('.na-wrap');
+    const full = wrap.querySelector('.na-full'), brief = wrap.querySelector('.na-brief');
+    const toFull = full.classList.contains('hidden');
+    full.classList.toggle('hidden', !toFull);
+    brief.classList.toggle('hidden', toFull);
+    b.textContent = toFull ? '收起' : '全文';
+  }));
 }
 
 function closeSheet() {
@@ -298,7 +319,8 @@ async function renderPlan() {
   try {
     const sd = state.stateData || (state.stateData = await fetchJSON('reports/state.json'));
     const t = localToday();
-    const groups = (sd.week || []).filter(g => g.date >= t);  // 今天起（v9 桥接后不再显示过去的组）
+    if (sd.month) { el.innerHTML = renderMonth(sd, t); bindRows(el); return; }
+    const groups = (sd.week || []).filter(g => g.date >= t);  // 旧快照回退 week
     if (!groups.length) { el.innerHTML = emptyState('', '未来 7 天没有安排'); return; }
     el.innerHTML = groups.map(g => {
       const rel = g.date === t ? '今天 · ' : g.date === addDaysIso(t, 1) ? '明天 → ' : '';
@@ -312,6 +334,30 @@ async function renderPlan() {
   } catch (e) {
     el.innerHTML = emptyState('', '计划数据来自每晚的 state.json（今晚起生成）', e.message);
   }
+}
+
+// v10 月视图：跨多日区 → 过去区（默认折叠，专供清理）→ 今天起逐天到月底
+function renderMonth(sd, t) {
+  const m = sd.month;
+  const keys = Object.keys(m.days).sort();
+  const past = keys.filter(k => k < t);
+  const future = keys.filter(k => k >= t);
+  const dayGroup = (k, g, isPast) => {
+    const rel = k === t ? '今天 · ' : k === addDaysIso(t, 1) ? '明天 → ' : '';
+    const items = (g.items || []).length
+      ? `<div class="cards">${g.items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>` : '';
+    const sched = (g.sched || []).length
+      ? `<div class="cards sched">${g.sched.map(it => itemCard(it, { kind: 'sched' })).join('')}</div>` : '';
+    return `<h3 class="dayhead${isPast ? ' past' : ''}">${rel}${fmtDay(k)}</h3>${items}${sched}${miscFold(g.misc)}`;
+  };
+  let html = spansFold(m.spans || []);
+  if (past.length) {
+    const n = past.reduce((acc, k) => acc + m.days[k].items.length, 0);
+    html += `<details class="pastfold"><summary>${m.label}已过去 · ${n} 条未完成，点开清理</summary>` +
+      past.map(k => dayGroup(k, m.days[k], true)).join('') + `</details>`;
+  }
+  html += future.map(k => dayGroup(k, m.days[k], false)).join('');
+  return html || emptyState('', '本月还没有安排');
 }
 
 // ---------- 收件箱（并入助手 tab：乐观纸条 + 展开/删除） ----------
@@ -445,6 +491,15 @@ function patchLocalRemoveTargets(targets) {
     g.misc = (g.misc || []).filter(it => !hit(it));
   });
   sd.stale = (sd.stale || []).filter(it => !hit(it));
+  if (sd.month) {
+    for (const k of Object.keys(sd.month.days)) {
+      const g = sd.month.days[k];
+      g.items = (g.items || []).filter(it => !hit(it));
+      g.sched = (g.sched || []).filter(it => !hit(it));
+      g.misc = (g.misc || []).filter(it => !hit(it));
+    }
+    sd.month.spans = (sd.month.spans || []).filter(it => !hit(it));
+  }
   rerenderTaskViews();
 }
 const patchLocalRemove = (f, l) => patchLocalRemoveTargets([[f, l]]);
@@ -464,6 +519,11 @@ function patchLocalInsert(item, kind = 'task') {
   } else if (d && d > t) {
     let g = (sd.week || []).find(x => x.date === d);
     if (!g) { g = { date: d, items: [], sched: [], misc: [] }; sd.week.push(g); sd.week.sort((a, b) => a.date < b.date ? -1 : 1); }
+    slot(g).push(item);
+  }
+  // v10：月窗内同步补丁（改期/添加的任务即时落月视图对应天；spans 项删除后重插会变单日期，落 days）
+  if (sd.month && d && d >= sd.month.start && d <= sd.month.end) {
+    const g = sd.month.days[d] || (sd.month.days[d] = { items: [], sched: [], misc: [] });
     slot(g).push(item);
   }
   rerenderTaskViews();

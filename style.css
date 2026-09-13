@@ -409,6 +409,23 @@ details.misifold[open] summary::before { content: '−'; }
 details.misifold .cards { margin-top: 4px; }
 details.misifold .cards .cb { color: var(--dim); font-size: 13.5px; }
 
+/* 过去区折叠（v10 月视图）：默认收起，专供清理未完成 */
+details.pastfold { margin: 10px 0 0; }
+details.pastfold summary {
+  font-size: 12px; color: var(--dim); cursor: pointer;
+  padding: 10px 2px; list-style: none; user-select: none;
+  letter-spacing: 0.4px;
+}
+details.pastfold summary::-webkit-details-marker { display: none; }
+details.pastfold summary::before { content: '+'; color: var(--faint); margin-right: 7px; font-weight: 650; }
+details.pastfold[open] summary::before { content: '−'; }
+details.pastfold .dayhead { color: var(--faint); margin-top: 16px; }
+
+/* 长行蒸馏卡（v10）：默认主旨句，「全文」就地切换 */
+.na-toggle { margin: 3px 0 0 8px; flex: none; align-self: flex-start; }
+.na-wrap { flex: 1 1 0; min-width: 0; }
+.cards .cb > .na-wrap { flex-basis: auto; }
+
 /* 底部动作表：点任意条目行弹出（删除/改期/转任务） */
 #sheet-backdrop {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); z-index: 24;
