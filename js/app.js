@@ -823,7 +823,7 @@ function drawChat() {
   el.querySelectorAll('.to-plan').forEach(b => b.addEventListener('click', () => {
     localStorage.setItem('pp_enterAction', 'ask');
     $('#chat-status').textContent = '整理提案中——若 2 分钟内没有出现提案卡，请重试或用「记下」手记';
-    chatSend('把我们最近的对话整理成 planning-update 提案块（每个文件一个，note 说明理由；情绪与感情文件不要动）。若没有值得落盘的内容，直接说明。');
+    chatSend('把我们最近的对话整理成 planning-update 提案块（每个文件一个，note 说明理由；情绪与感情文件不要动）。书写规范：分节标题用 ##，一行只写一件事，多日安排逐日成行，日期分节线禁止用加粗行。若没有值得落盘的内容，直接说明。');
   }));
 }
 async function retryLastChat() {
