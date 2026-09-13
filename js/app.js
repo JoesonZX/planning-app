@@ -119,9 +119,10 @@ const spansFold = (arr) => (arr && arr.length)
   : '';
 
 function bindRows(container) {
+  // v11：条目卡是框架的投影（只读）——点行 = 打开源文件看上下文，编辑与整理在文档面/提案
   container.querySelectorAll('.cb.act[data-f]').forEach(row =>
-    row.addEventListener('click', () => openActionSheet({ ...row.dataset })));
-  // v10 长行蒸馏：全文/主旨切换（不触发动作表）
+    row.addEventListener('click', () => openFile(row.dataset.f)));
+  // v10 长行蒸馏：全文/主旨切换（不触发跳转）
   container.querySelectorAll('.na-toggle').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
     const wrap = b.closest('.cb').querySelector('.na-wrap');
@@ -131,98 +132,6 @@ function bindRows(container) {
     brief.classList.toggle('hidden', toFull);
     b.textContent = toFull ? '收起' : '全文';
   }));
-}
-
-function closeSheet() {
-  $('#actionsheet')?.remove();
-  $('#sheet-backdrop')?.remove();
-}
-function openActionSheet(d) {
-  closeSheet();
-  vibrate();
-  const delLabel = d.src ? `删除（含 ${JSON.parse(d.src).length} 处重复）` : '删除';
-  const segNote = d.seg ? ' · 多日框架行，删除移除整行' : '';
-  const dateRow = d.seg ? '' :
-    `<div class="sheet-date"><input type="date" id="sheet-date" value="${d.date || ''}">` +
-    `<button class="sheet-btn accent" data-act="resched">改期</button></div>`;
-  const convBtn = d.kind === 'sched' ? `<button class="sheet-btn accent" data-act="conv">转任务</button>` : '';
-  const delBtn = safeFile(d.f) ? `<button class="sheet-btn danger" data-act="del">${delLabel}</button>` : '';
-  const el = document.createElement('div');
-  el.id = 'actionsheet';
-  el.innerHTML = `<div class="sheet-title">${escapeHtml(d.t || '（无文本）')}</div>` +
-    `<div class="sheet-sub">（${d.f.replace(/^规划\//, '').replace(/\.md$/, '')}）${segNote}</div>` +
-    convBtn + dateRow + delBtn +
-    `<button class="sheet-cancel" data-act="cancel">取消</button>`;
-  const bd = document.createElement('div');
-  bd.id = 'sheet-backdrop';
-  document.body.appendChild(bd);
-  document.body.appendChild(el);
-  requestAnimationFrame(() => { bd.classList.add('on'); el.classList.add('on'); });
-  bd.addEventListener('click', closeSheet);
-  el.addEventListener('click', e => {
-    const act = e.target.closest('[data-act]')?.dataset.act;
-    if (!act) return;
-    if (act === 'cancel') closeSheet();
-    else if (act === 'del') sheetDelete(d);
-    else if (act === 'resched') sheetResched(d, $('#sheet-date')?.value);
-    else if (act === 'conv') sheetConvert(d);
-  });
-}
-async function sheetDelete(d) {
-  const targets = d.src ? JSON.parse(d.src) : [[d.f, +d.l]];
-  try {
-    await busy((async () => {
-      for (const [f, l] of targets) {
-        if (!safeFile(f)) throw new Error('该文件不可在此删除');
-        await writeFile(f, cur => {
-          const lines = cur.split('\n');
-          if (l - 1 >= lines.length || !lines[l - 1].trim()) throw new Error('该行已变化，请刷新后重试');
-          const hit = normKey(d.t).slice(0, 12);
-          if (hit && !normKey(lines[l - 1]).includes(hit)) throw new Error('该行已变化，请刷新后重试');
-          return lines.filter((_, i) => i !== l - 1).join('\n');
-        }, `app: 删除条目 ${f}:${l}`);
-      }
-    })());
-    vibrate(); closeSheet(); toast('已删除');
-    patchLocalRemoveTargets(targets);
-  } catch (e) { closeSheet(); toast('删除失败：' + e.message, true); }
-}
-async function sheetResched(d, val) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val || '');
-  if (!m) { closeSheet(); return toast('先选一个日期', true); }
-  try {
-    const { unchanged } = await busy(writeFile(d.f, cur => {
-      const lines = cur.split('\n');
-      if (d.l - 1 >= lines.length) throw new Error('行号已失效，请刷新');
-      const before = lines[d.l - 1];
-      const after = before.replace(/(\d{1,2})[.\/](\d{1,2})/, `${+m[2]}/${+m[3]}`);
-      if (after === before) throw new Error('该行没有 M/D 日期可改');
-      lines[d.l - 1] = after;  // v9 复查：算出 after 必须写回——否则整文件原文返回，unchanged 假成功
-      return lines.join('\n');
-    }, `app: 条目改期 ${d.f}:${d.l} → ${+m[2]}/${+m[3]}`));
-    vibrate(); closeSheet();
-    toast(unchanged ? '该条已是所选日期' : '✓ 已改期');
-    const moved = state.fileCache[d.f]?.lines?.[d.l - 1];
-    patchLocalRemoveTargets([[d.f, +d.l]]);
-    if (moved && !unchanged) patchLocalInsert({
-      t: moved.replace(/^[-*]\s+\[[ xX]\]\s*/, '').replace(/^>\s*/, '').replace(/\r$/, ''),
-      s: d.s === '1',
-      d: d.kind === 'task' ? /\[x\]/i.test(moved) : undefined,
-      f: d.f, l: +d.l, dates: [`${m[1]}-${m[2]}-${m[3]}`],
-    }, d.kind);
-  } catch (e) { closeSheet(); toast('改期失败：' + e.message, true); }
-}
-async function sheetConvert(d) {
-  const text = (d.t || '').slice(0, 120);
-  try {
-    await busy(writeFile(d.f, cur => cur.replace(/\s*$/, '') + `\n- [ ] ${text}（转自日程）\n`,
-      'app: 日程转任务'));
-    vibrate(); closeSheet();
-    toast('✓ 已登记为任务（无日期，滑落跟踪）');
-    const cached = state.fileCache[d.f];
-    const lineNo = cached ? cached.lines.findIndex(ln => ln.includes('转自日程') && ln.includes(text.slice(0, 20))) : -1;
-    patchLocalInsert({ t: `${text}（转自日程）`, s: false, d: false, f: d.f, l: lineNo + 1, dates: [localToday()] });
-  } catch (e) { closeSheet(); toast('失败：' + e.message, true); }
 }
 
 // ---------- 今天 ----------
@@ -275,16 +184,14 @@ async function renderToday() {
         html += `<div class="trow"><b>${time}</b><span>${label}</span></div>`;
       html += '</div>';
     }
-    // 日程安排在上（按计划走，不算任务），代办事项在下（v9 两区排列）
+    // v11 今日锚点：日程安排（框架投影）在上，今日推进（⭐ 优先）在下——只读简报，不是待办池
     if (sched.length)
       html += `<h2 class="sec">日程安排</h2><div class="cards sched">${sched.map(it => itemCard(it, { kind: 'sched' })).join('')}</div>`;
     html += items.length
-      ? `<h2 class="sec">代办事项</h2><div class="cards">${items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>`
-      : emptyState('', '今天没有标注任务——把明天要做的提前想好');
+      ? `<h2 class="sec">今日推进</h2><p class="dim small">计划中今天的位置 · 执行细节在你的 todo 应用</p><div class="cards">${items.map(it => itemCard(it, { kind: 'task' })).join('')}</div>`
+      : emptyState('', '今天没有框架内的推进项——想推进什么，记进你的 todo 应用');
     html += miscFold(misc);
     html += `<button id="btn-diary" class="diary-entry"><b>日记</b><span>记一笔今天 · 做了什么与感受</span></button>`;
-    if (sd.stale.length)
-      html += `<h2 class="sec">滑落（拖了很久）</h2><div class="cards">${sd.stale.map(it => itemCard(it, { kind: 'task' })).join('')}</div>`;
     if (state.statsData) html += renderHeatmap(state.statsData);
     el.innerHTML = html;
     bindRows(el);
@@ -300,20 +207,6 @@ async function renderToday() {
 // ---------- 计划 ----------
 async function renderPlan() {
   const el = $('#plan-body');
-  if (!$('#add-task-row')) {
-    el.parentElement.insertAdjacentHTML('afterbegin', `
-      <div id="add-task-row" class="nt-row">
-        <input id="nt-text" type="text" placeholder="新任务…">
-        <input id="nt-date" type="text" placeholder="M/D">
-        <button id="nt-star" class="nt-star" title="硬节点">☆</button>
-        <button id="nt-add" class="nt-add">添加</button>
-      </div>`);
-    $('#nt-star').addEventListener('click', e => {
-      e.currentTarget.classList.toggle('on');
-      e.currentTarget.textContent = e.currentTarget.classList.contains('on') ? '★' : '☆';
-    });
-    $('#nt-add').addEventListener('click', addTaskDirect);
-  }
   el.innerHTML = skeleton();
   el.dataset.loaded = '1';
   try {
@@ -469,102 +362,6 @@ async function flushOutbox() {
   } catch { /* 下次再试 */ }
   finally { outboxFlushing = false; }
 }
-// 直通任务 CRUD（不经 LLM，sha 冲突安全）
-// 本地补丁：直通操作改的是 md 文件，state.json 要等引擎（6/9/21 点）才重算——
-// 在前端同步打补丁让操作即时可见，引擎数据到位后自然覆盖
-function rerenderTaskViews() {
-  $('#today-body').dataset.loaded = '';
-  $('#plan-body').dataset.loaded = '';
-  if ($('#view-today').classList.contains('active')) renderToday();
-  if ($('#view-plan').classList.contains('active')) { renderPlan(); renderDocs(); }
-}
-function patchLocalRemoveTargets(targets) {
-  const sd = state.stateData;
-  const hit = it => targets.some(([f, l]) => it.f === f && it.l === l);
-  if (!sd) return rerenderTaskViews();
-  sd.today_items = (sd.today_items || []).filter(it => !hit(it));
-  sd.sched_today = (sd.sched_today || []).filter(it => !hit(it));
-  sd.misc_today = (sd.misc_today || []).filter(it => !hit(it));
-  (sd.week || []).forEach(g => {
-    g.items = (g.items || []).filter(it => !hit(it));
-    g.sched = (g.sched || []).filter(it => !hit(it));
-    g.misc = (g.misc || []).filter(it => !hit(it));
-  });
-  sd.stale = (sd.stale || []).filter(it => !hit(it));
-  if (sd.month) {
-    for (const k of Object.keys(sd.month.days)) {
-      const g = sd.month.days[k];
-      g.items = (g.items || []).filter(it => !hit(it));
-      g.sched = (g.sched || []).filter(it => !hit(it));
-      g.misc = (g.misc || []).filter(it => !hit(it));
-    }
-    sd.month.spans = (sd.month.spans || []).filter(it => !hit(it));
-  }
-  rerenderTaskViews();
-}
-const patchLocalRemove = (f, l) => patchLocalRemoveTargets([[f, l]]);
-function patchLocalInsert(item, kind = 'task') {
-  const sd = state.stateData;
-  if (!sd) return rerenderTaskViews();
-  const t = localToday();
-  const d = (item.dates || [])[0];
-  const slot = g => (kind === 'sched' ? g.sched : kind === 'misc' ? g.misc : g.items);
-  if (d === t) {
-    if (t <= sd.today) (kind === 'sched' ? sd.sched_today : kind === 'misc' ? sd.misc_today : sd.today_items).push(item);
-    else {
-      let g = (sd.week || []).find(x => x.date === d);
-      if (!g) { g = { date: d, items: [], sched: [], misc: [] }; sd.week.push(g); sd.week.sort((a, b) => a.date < b.date ? -1 : 1); }
-      slot(g).push(item);
-    }
-  } else if (d && d > t) {
-    let g = (sd.week || []).find(x => x.date === d);
-    if (!g) { g = { date: d, items: [], sched: [], misc: [] }; sd.week.push(g); sd.week.sort((a, b) => a.date < b.date ? -1 : 1); }
-    slot(g).push(item);
-  }
-  // v10：月窗内同步补丁（改期/添加的任务即时落月视图对应天；spans 项删除后重插会变单日期，落 days）
-  if (sd.month && d && d >= sd.month.start && d <= sd.month.end) {
-    const g = sd.month.days[d] || (sd.month.days[d] = { items: [], sched: [], misc: [] });
-    slot(g).push(item);
-  }
-  rerenderTaskViews();
-}
-async function addTaskDirect() {
-  const text = $('#nt-text').value.trim();
-  if (!text) return;
-  // v8 紧凑表单去掉了文件选择——默认执行清单（学期主文件）；要进别的文件用聊天提案
-  const file = '规划/26fall 9月执行清单.md';
-  const dv = $('#nt-date').value.trim();
-  const today = new Date();
-  const m = dv.match(/^(\d{1,2})[\/.](\d{1,2})$/);
-  const dateStr = m ? `${+m[1]}/${+m[2]}` : `${today.getMonth() + 1}/${today.getDate()}`;
-  const star = $('#nt-star').classList.contains('on') ? '⭐' : '';
-  const btn = $('#nt-add');
-  btn.disabled = true; btn.textContent = '添加中…';
-  try {
-    const { unchanged } = await writeFile(file,
-      cur => cur.replace(/\s*$/, '') + `
-- [ ] ${star}${text}（${dateStr}）
-`,
-      `app: 添加任务 ${file}`);
-    vibrate();
-    btn.textContent = unchanged ? '已存在' : '✓ 已添加';
-    $('#nt-text').value = '';
-    setTimeout(() => { btn.textContent = '添加任务'; btn.disabled = false; }, 900);
-    // 乐观上屏：从写回后的缓存定位行号，本地补丁进今天/计划视图
-    const cached = state.fileCache[file];
-    const lineNo = cached ? cached.lines.findIndex(ln => ln.includes(text) && ln.includes(dateStr)) : -1;
-    const [mm, dd] = dateStr.split('/').map(Number);
-    const y = new Date().getFullYear();
-    patchLocalInsert({
-      t: `${text}（${dateStr}）`, s: !!star, d: false, f: file,
-      l: lineNo + 1, dates: [`${y}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`],
-    });
-  } catch (e) {
-    btn.disabled = false; btn.textContent = '添加任务';
-    toast('添加失败：' + e.message, true);
-  }
-}
-
 // ---------- 文档（报告 + 文件，住进「计划」子页） ----------
 async function renderDocs() {
   const reports = state.tree.filter(t =>
@@ -896,8 +693,8 @@ function bindChat() {
     toast('聊天记录已清空');
   });
   const presets = [
-    ['周日复盘', '请带我做完本周复盘：1) 从 vault 列出本周完成与滑落；2) 一次一个地问我三个关于下周的问题，等我回答；3) 最后汇总「下周三件事」，每件带何时/何地。'],
-    ['今天做什么', '基于今天的日期和 vault，告诉我今天最该做的三件事和顺序，一句话理由。'],
+    ['周日复盘', '请带我做完本周复盘：1) 从 vault 与决策卡列出本周进展与缺口；2) 用三问反思——现在最重要的事是什么、哪些日常系统在支撑它、什么在拖累我；3) 最后汇总「下周三件事」，每件带何时/何地。'],
+    ['我该不该…', '我想做一个决定（先说给你听）。请先问我不超过两个澄清问题，再结合我的决策卡与画像给出建议：列出选项、各自代价、与过往决策的一致性；最终决定由我来拍板，拍板后提醒我记一张决策卡。'],
   ];
   $('#chat-presets').innerHTML = presets.map((p, i) =>
     `<button class="mini preset" data-i="${i}">${p[0]}</button>`).join('');
@@ -1020,7 +817,7 @@ let gChord = false;
 function bindKeys() {
   document.addEventListener('keydown', e => {
     const typing = /INPUT|TEXTAREA|SELECT/.test(e.target.tagName);
-    if (e.key === 'Escape') { $('#file-viewer').classList.remove('on'); closeSheet(); return; }
+    if (e.key === 'Escape') { $('#file-viewer').classList.remove('on'); return; }
     if (typing || e.metaKey || e.ctrlKey) return;
     if (gChord) {
       gChord = false;

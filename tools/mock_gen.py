@@ -22,6 +22,7 @@ COPY = [
     "人生规划.md",
     "规划.md",
     "profile.md",
+    "决策/2026-09-13 执行层外包给 todo 应用.md",
     "规划/26fall 9月执行清单.md",
     "规划/26 fall.md",
     "规划/26fall 旅行攻略（SD-JT-LA）.md",
