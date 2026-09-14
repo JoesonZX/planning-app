@@ -1,5 +1,5 @@
 // sw.js — app shell 缓存（网络优先，离线兜底）+ Web Push 接收
-const SHELL = 'pp-shell-v11';
+const SHELL = 'pp-shell-v12';
 const ASSETS = [
   './', './index.html', './style.css',
   './js/app.js', './js/api.js', './js/md.js', './js/chat.js', './js/store.js', './js/diary.js', './js/mock.js',
