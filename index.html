@@ -27,7 +27,7 @@
       <ol class="steps">
         <li>打开 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub PAT 页面</a>，只勾 <b>planning-data</b> 仓 + Contents 读写，生成后复制</li>
         <li>粘贴到下方 PAT 框，点「连接」</li>
-        <li>想解锁聊天和推送，在设置（左上角 ☰）里补 GLM key</li>
+        <li>想解锁秘书聊天，在设置（左上角 ☰）里补 GLM key</li>
       </ol>
       <div class="row"><input id="ob-pat" type="password" placeholder="github_pat_…"><button id="ob-save" class="primary">连接</button></div>
     </div>
@@ -88,9 +88,8 @@
   <input id="set-pat" type="password" placeholder="github_pat_…">
   <label>仓库</label>
   <input id="set-repo" type="text">
-  <h2>推送</h2>
-  <div class="row"><button id="btn-push" class="primary">开启推送</button></div>
-  <p class="dim small">iOS 需先把本页「添加到主屏幕」再点。收到：每晚报告、周报、任务失败警报。关闭 = 再次点击。</p>
+  <h2>提醒</h2>
+  <p class="dim small">v13 起死线提醒走 deadlines.ics（导入手机日历得系统级通知）+ 每晚报告，应用内推送已退役。</p>
   <h2>GLM 聊天</h2>
   <label>GLM API Key（coding plan 的 key 直接可用）</label>
   <input id="set-glm" type="password" placeholder="粘贴 key">
@@ -104,7 +103,7 @@
   <button id="btn-save-settings" class="primary">保存并连接</button>
   <details class="guide"><summary>iPhone 配置与随手记快捷指令（10 分钟）</summary>
     <ol class="steps small">
-      <li>Safari 打开本页 → 分享 → 「添加到主屏幕」（PWA 推送的前提）</li>
+      <li>Safari 打开本页 → 分享 → 「添加到主屏幕」（PWA 离线使用的前提）</li>
       <li>快捷指令 App → 新建：①「获取文本」输入内容 ②「获取 URL 内容」：PUT <code>https://api.github.com/repos/你的仓/contents/inbox.md</code>（先 GET 取 sha 再 PUT，Authorization: Bearer 你的PAT）③每次运行自动追加到 inbox</li>
       <li>可设为「共享表单」动作：任何 App 里分享文字 → 直达 inbox</li>
     </ol>

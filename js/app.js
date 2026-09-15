@@ -6,7 +6,8 @@ import { render as mdRender, flipCheckbox, escapeHtml, inline } from './md.js';
 import { buildContext, sendChat, renderMessage, usageSummary } from './chat.js';
 import { openDiary } from './diary.js';
 
-const VAPID_PUBLIC = 'BPkee1I-7uyoJVE6Df3nIa9UqHT3vGKBnofIn7VwAWq9uuVbrHqLbaEOvDoiPCXVT7UdrSPtQBgl_Se44wCr-pE';
+// v13：Web Push 链路退役（push-sub.json 从未存在=零使用）——提醒借力 ICS+系统日历
+
 const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六'];
 
 // v9：设备时钟是「今天」的唯一权威（state.today 由生成时刻写死——凌晨 0 点到
@@ -659,59 +660,6 @@ function bindChat() {
   drawChat();
 }
 
-// ---------- 推送 ----------
-function urlB64ToUint8Array(b64) {
-  const pad = '='.repeat((4 - b64.length % 4) % 4);
-  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
-  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
-}
-async function getPushSubs() {
-  try {
-    const f = await fetchFile('reports/push-sub.json');
-    return JSON.parse(f.text).subscriptions || [];
-  } catch { return []; }
-}
-async function savePushSubs(subs) {
-  await writeFile('reports/push-sub.json',
-    JSON.stringify({ subscriptions: subs }, null, 1), 'app: 更新推送订阅');
-}
-async function togglePush(btn) {
-  btn.disabled = true;
-  try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in window))
-      throw new Error('此浏览器不支持 Web Push');
-    const reg = await navigator.serviceWorker.ready;
-    let sub = await reg.pushManager.getSubscription();
-    if (sub) { // 关闭
-      await sub.unsubscribe();
-      const subs = (await getPushSubs()).filter(s => s.endpoint !== sub.endpoint);
-      await savePushSubs(subs);
-      btn.textContent = '开启推送';
-      toast('推送已关闭');
-    } else {    // 开启
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') throw new Error('通知权限被拒绝');
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC),
-      });
-      const subs = await getPushSubs();
-      subs.push(sub.toJSON());
-      await savePushSubs(subs);
-      btn.textContent = '关闭推送';
-      toast('推送已开启，今晚 21:00 见');
-    }
-  } catch (e) { toast('推送设置失败：' + e.message, true); }
-  btn.disabled = false;
-}
-async function initPushBtn() {
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription();
-    if (sub) $('#btn-push').textContent = '🔕 关闭推送';
-  } catch { /* ignore */ }
-}
-
 // ---------- 设置 ----------
 function fillSettings() {
   const s = settings.load();
@@ -746,7 +694,6 @@ function bindSettings() {
   };
   $('#btn-save-settings').addEventListener('click', saveAndConnect);
   $('#ob-save').addEventListener('click', () => { $('#set-pat').value = $('#ob-pat').value; saveAndConnect(); });
-  $('#btn-push').addEventListener('click', e => togglePush(e.currentTarget));
   $('#btn-clear-local').addEventListener('click', () => {
     if (!confirm('清空本浏览器保存的全部设置与聊天记录？')) return;
     Object.keys(localStorage).filter(k => k.startsWith('pp_')).forEach(k => localStorage.removeItem(k));
@@ -858,7 +805,6 @@ async function boot() {
   });
   const s = settings.load();
   fillSettings();
-  initPushBtn();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   if (!s.pat) { show('today'); toast('三步开始：粘贴 GitHub PAT', true); return; }
   try {
